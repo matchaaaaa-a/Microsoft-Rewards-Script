@@ -2,8 +2,12 @@ sessions/
 dist/
 .dev/
 node_modules/
+# Never commit real credentials (use *.example.json templates)
 src/accounts.json
 src/config.json
+accounts.local.json
+config.local.json
+*.backup.json
 /.vscode
 /diagnostics
 note
@@ -12,7 +16,3 @@ accounts.main.json
 .DS_Store
 .playwright-chromium-installed
 bun.lock
-.env
-.env.*
-!.env.example
-*.pem

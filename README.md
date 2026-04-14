@@ -23,11 +23,13 @@ cd Microsoft-Rewards-Script
 ```
 Or, download the latest release ZIP and extract it.
 
-### Create an account.json and config.json
-Copy, rename, and edit your account and configuration files before deploying the script.
-- Copy or rename `src/accounts.example.json` to `src/accounts.json` and add your credentials
-- Copy or rename `src/config.example.json` to `src/config.json` and customize your preferences.
-- If you use the `gemini` query engine, set `geminiApiKey` in `config.json` (comma-separated for multiple keys). Never commit real keys or `accounts.json` to Git.
+### Create `accounts.json` and `config.json`
+Only the **example** files are tracked in git. Copy them locally and fill in your own values (never commit the real files).
+
+- Copy `src/accounts.example.json` → `src/accounts.json` and add your Microsoft account credentials.
+- Copy `src/config.example.json` → `src/config.json` and customize options.
+
+**`geminiApiKey`:** use your [Google AI Studio](https://aistudio.google.com/apikey) key(s). Placeholders in the example are `changeme,changeme2`. **Multiple keys:** use a comma-separated list (same string) so the bot can rotate when a key hits rate limits.
 
 > [!CAUTION]
 > Do not skip this step.
@@ -90,7 +92,7 @@ This will launch the script headlessly using `xvfb-run`.
 | `clusters` | number | `1` | Number of concurrent account clusters |
 | `errorDiagnostics` | boolean | `false` | Enable error diagnostics |
 | `searchOnBingLocalQueries` | boolean | `false` | Use local query list |
-| `geminiApiKey` | string | `""` | Google Gemini API key(s); comma-separated for rotation. Required when `gemini` is in `searchSettings.queryEngines` |
+| `geminiApiKey` | string | `""` | Google Gemini API key(s). Comma-separated = multiple keys for rotation (e.g. `key1,key2`). Required when `queryEngines` includes `gemini`. |
 | `globalTimeout` | string | `"30sec"` | Timeout for all actions |
 
 > [!CAUTION]
@@ -166,8 +168,8 @@ This will launch the script headlessly using `xvfb-run`.
 ## Account Configuration
 
 > [!WARNING]
-> Edit `src/accounts.json`. The file is a **flat array** of accounts, not `{ "accounts": [ ... ] }`.
-> Rebuild the script after all changes.
+> Edit `src/accounts.json` (create it from `src/accounts.example.json`). The file is a **flat array** of accounts, not `{ "accounts": [ ... ] }`.
+> `src/accounts.json` is listed in `.gitignore` so it is not pushed to GitHub. Rebuild after changes.
 
 ```json
 [

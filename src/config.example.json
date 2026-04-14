@@ -18,7 +18,7 @@
         "doClaimAllPoints": true
     },
     "searchOnBingLocalQueries": false,
-    "geminiApiKey": "",
+    "geminiApiKey": "changeme,changeme2",
     "globalTimeout": "120sec",
     "searchSettings": {
         "scrollRandomResults": false,

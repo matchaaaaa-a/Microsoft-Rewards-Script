@@ -1,7 +1,7 @@
 [
     {
         "email": "you@example.com",
-        "password": "REPLACE_WITH_YOUR_PASSWORD",
+        "password": "your-password-here",
         "totpSecret": "",
         "recoveryEmail": "",
         "geoLocale": "auto",
@@ -9,7 +9,7 @@
         "proxy": {
             "proxyAxios": false,
             "url": "",
-            "port": 1,
+            "port": 0,
             "username": "",
             "password": ""
         },
