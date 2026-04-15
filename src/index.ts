@@ -157,16 +157,22 @@ export class MicrosoftRewardsBot {
     private async runMaster(runStartTime: number): Promise<void> {
         void this.logger.info('main', 'CLUSTER-PRIMARY', `Primary process started | PID: ${process.pid}`)
 
-        const rawChunks = this.utils.chunkArray(this.accounts, this.config.clusters)
-        const accountChunks = rawChunks.filter(c => c && c.length > 0)
-        this.activeWorkers = accountChunks.length
+        const accountQueue = [...this.accounts]
+        const maxWorkers = Math.max(1, Math.min(this.config.clusters, accountQueue.length))
+        this.activeWorkers = 0
 
         const allAccountStats: AccountStats[] = []
         let hadWorkerFailure = false
 
-        for (const chunk of accountChunks) {
+        const spawnNextWorker = async (): Promise<boolean> => {
+            const nextAccount = accountQueue.shift()
+            if (!nextAccount) {
+                return false
+            }
+
             const worker = cluster.fork()
-            worker.send?.({ chunk, runStartTime })
+            this.activeWorkers += 1
+            worker.send?.({ chunk: [nextAccount], runStartTime })
 
             worker.on('message', (msg: { __ipcLog?: IpcLog; __stats?: AccountStats[] }) => {
                 if (msg.__stats) {
@@ -188,10 +194,12 @@ export class MicrosoftRewardsBot {
                 }
             })
 
-            // Startup delay for clusters due to resource usage
-            if (accountChunks.indexOf(chunk) !== accountChunks.length - 1) {
+            // Startup delay to smooth resource usage spikes
+            if (accountQueue.length > 0) {
                 await this.utils.wait(5000)
             }
+
+            return true
         }
 
         const onWorkerExit = async (worker: Worker, code?: number, signal?: string): Promise<void> => {
@@ -208,6 +216,10 @@ export class MicrosoftRewardsBot {
             const failed = (code ?? 0) !== 0 || Boolean(signal)
             if (failed) {
                 hadWorkerFailure = true
+            }
+
+            if (accountQueue.length > 0) {
+                await spawnNextWorker()
             }
 
             this.logger.warn(
@@ -243,6 +255,13 @@ export class MicrosoftRewardsBot {
             const pid = worker.process?.pid
             this.logger.warn('main', 'CLUSTER-WORKER-DISCONNECT', `Worker ${pid ?? '?'} disconnected`) // <-- Warning only
         })
+
+        for (let i = 0; i < maxWorkers; i++) {
+            const spawned = await spawnNextWorker()
+            if (!spawned) {
+                break
+            }
+        }
     }
 
     private runWorker(runStartTimeFromMaster?: number): void {

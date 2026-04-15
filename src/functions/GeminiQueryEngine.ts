@@ -45,85 +45,92 @@ export class GeminiQueryEngine {
     }
 
     async generateSearchQueries(): Promise<string[]> {
-        const prompt = `You are an expert at mimicking real, authentic Google search behavior from everyday people worldwide. Generate a JSON array with exactly 120 unique items. Each item must be a realistic search query that feels like something a normal person would actually search for:
+        const prompt = `You are an elite data simulation AI specializing in human search behavior and query log generation. Your task is to generate a JSON array containing exactly 120 unique, highly realistic Google search queries that reflect authentic user behavior worldwide in the year 2026.
 
-REALISTIC SEARCH PATTERNS TO INCLUDE:
-- Practical how-to searches (cooking, repairs, DIY, tutorials)
-- Entertainment (movies, shows, music, games, celebrities)
-- Shopping (prices, reviews, comparisons, deals)
-- Local services (restaurants, stores, directions, hours)
-- Health & fitness (workouts, diets, symptoms, supplements)
-- Technology (phones, computers, apps, gadgets)
-- Travel & weather (flights, hotels, forecasts, destinations)
-- News & current events (breaking news, sports scores, politics)
-- Work/school (job searches, homework help, productivity tips)
-- Hobbies & interests (books, sports, crafts, gaming)
-- Relationships & social (dating advice, family issues, friendships)
-- Home & garden (cleaning, decorating, repairs, plants)
-- Finance (budgeting, investing, taxes, banking)
-- Food & recipes (restaurants, cooking methods, ingredients)
-- Random daily questions (what time is it, calculator, unit conversions)
+CORE AUTHENTICITY RULES:
+Real people do not always type in perfect sentences. To simulate authentic search behavior, you must incorporate the following patterns:
 
-SEARCH CHARACTERISTICS:
-- Longer, more detailed queries (8-20 words typical)
-- Natural typing patterns (lowercase, abbreviations, typos sometimes)
-- Include question words: what, how, why, where, when, which, best, cheapest, fastest
-- Add casual phrases: "near me", "right now", "this week", "for beginners", "step by step"
-- Include brand names, product models, celebrity names, specific requirements
-- Some searches with locations: "in [city]", "near [place]", "in my area"
-- Mix current/popular topics with evergreen searches
-- Include specific details like prices, features, requirements, comparisons
+Varying Lengths: Mix short fragmented keywords (2-4 words), medium informational queries (5-7 words), and long-tail conversational questions (8+ words).
 
-DISTRIBUTION GUIDELINES:
-- 15-20 practical how-to searches
-- 15-20 shopping/product searches
-- 10-15 entertainment/media searches
-- 10-15 local service searches
-- 8-12 health/fitness searches
-- 8-12 technology searches
-- 8-12 news/current events
-- 8-12 work/school searches
-- 6-10 travel/weather searches
-- 6-10 food/recipe searches
-- 6-10 finance searches
-- 6-10 home/garden searches
-- 4-8 relationship/social searches
-- 4-8 hobby/sport searches
+Natural Syntax: Use all lowercase. Omit punctuation (no question marks, commas, or apostrophes).
 
-EXAMPLES OF REALISTIC LONGER SEARCHES:
-"best wireless earbuds under 100 dollars with good battery life and noise cancelling features"
-"how to fix a leaky faucet step by step guide for beginners with tools needed"
-"netflix shows to watch this weekend that are good for binge watching with family"
-"italian restaurants near union square that are open late and have outdoor seating"
-"what are the symptoms of covid right now and how long do they typically last"
-"iphone 15 pro max vs samsung s24 ultra camera comparison and which is better value"
-"weather forecast for next 10 days including temperature highs and lows for my location"
-"how to make homemade pizza dough from scratch with step by step instructions"
-"cheapest flights from nyc to london this month with layovers and total travel time"
-"best workout routine for beginners at home that requires no equipment and takes 30 minutes"
-"what time does target open today and do they have the ps5 restock in stock"
-"how to remove wine stains from carpet using household items and professional cleaners"
-"best movies on hulu right now that are critically acclaimed and have high ratings"
-"costco membership fee 2024 and what benefits do you get with the gold star membership"
-"how long to boil eggs for hard boiled and how to tell when they are perfectly done"
-"jobs hiring near me no experience required and paying at least 15 dollars per hour"
-"best hiking trails in colorado for families with kids that are not too strenuous"
-"how to change oil in car yourself step by step with pictures and common mistakes to avoid"
-"current gas prices in my area and which gas station has the cheapest unleaded today"
-"best noise cancelling headphones 2024 with wireless charging and comfortable for long flights"
+Human Imperfections: Include occasional common typos (e.g., "restarant", "definitly"), abbreviations (e.g., "w/", "vs", "dr"), and fragmented grammar (e.g., "best pizza chicago" instead of "where is the best pizza in chicago").
 
-Output ONLY valid JSON — nothing else — exactly like this:
+Modern Modifiers: Frequently append realistic modifiers like "near me", "reddit", "2026", "review", "for beginners", "cheap", and "step by step".
+
+2026 Context: Seamlessly integrate 2026-appropriate technology, current events, and pop culture (e.g., iPhone 17 or 18, Samsung S26, current AI tools, 2026 tax brackets, latest car models, GTA 6).
+
+Specifics: Include real brand names, specific locations, product models, and celebrity names.
+
+DISTRIBUTION MATRIX (Exactly 120 Queries):
+Generate exactly 6 queries for each of the 20 categories below (20 x 6 = 120 total):
+
+Cooking, Food & Recipes: (e.g., dinner ideas, baking times, ingredient substitutes)
+
+Home Repairs & DIY: (e.g., fixing leaks, woodworking plans, painting tips)
+
+Shopping & Product Reviews: (e.g., budget vacuums, unboxing, vs comparisons)
+
+Fashion & Beauty: (e.g., 2026 fashion trends, skincare routines, makeup dupes)
+
+Movies & Television: (e.g., streaming release dates, actor names, ending explained)
+
+Music & Live Events: (e.g., concert tickets, lyrics meaning, festival lineups)
+
+Gaming & Esports: (e.g., gta 6 walkthrough, ps6 rumors, console specs)
+
+Local Services (Non-Food): (e.g., mechanics near me, store hours, plumbers)
+
+Dining & Restaurants: (e.g., best sushi near me, reservations, vegan options)
+
+Medical & Symptoms: (e.g., headache causes, home remedies, side effects)
+
+Fitness & Nutrition: (e.g., ab workouts, macro calculators, protein powder)
+
+Consumer Tech & Gadgets: (e.g., iphone 18 rumors, tv sizes, smartwatch battery)
+
+Software & IT Troubleshooting: (e.g., wifi not working, app down right now)
+
+Personal Finance & Crypto: (e.g., 2026 tax brackets, btc price, high yield savings)
+
+News & Current Events: (e.g., local headlines, global news, election results)
+
+Career & Job Search: (e.g., resume templates, interview prep, remote jobs)
+
+Education & Study Help: (e.g., calculus solver, history timelines, apa format)
+
+Travel & Tourism: (e.g., cheap flights, packing lists, hotel reviews)
+
+Weather & Transportation: (e.g., weekend forecast, subway delays, traffic)
+
+Relationships, Family & Pets: (e.g., dog training, dating app advice, toddler tantrums)
+
+EXAMPLES OF AUTHENTIC QUERIES:
+"best noise cancelling earbuds under 100 reddit 2026"
+"iphone 18 pro vs samsung s26 ultra camera test"
+"what time does target close on sunday"
+"is it normal to feel tired after eating carbs"
+"how to get past bank heist mission in gta 6"
+"restaurants open late near me"
+"2026 tax brackets single filer"
+"symptoms of strep throat without fever"
+"how to train golden retriever puppy not to bite"
+"how to get red wine out of white carpet"
+
+STRICT OUTPUT CONSTRAINTS:
+You must output ONLY a valid JSON array of strings.
+
+Do NOT wrap the output in Markdown formatting (do not use \`\`\`json or \`\`\`).
+
+Do NOT include any introductory or concluding text.
+
+The very first character of your response must be [ and the very last character must be ].
 
 [
-  "best wireless earbuds under 100 dollars",
-  "how to fix a leaky faucet step by step",
-  "netflix shows to watch this weekend",
-  "italian restaurants near union square",
-  "what are the symptoms of covid right now",
-  ...
-]
-
-Ensure all 120 are unique, realistic searches that real people would actually type. Start directly with [ and end with ] — no intro, no explanations, no extra text.`
+"your first query here",
+"your second query here",
+"your third query here"
+]`
 
         let attempt = 0
         let consecutiveFailures = 0

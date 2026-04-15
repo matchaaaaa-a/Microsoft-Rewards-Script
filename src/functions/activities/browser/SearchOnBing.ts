@@ -21,6 +21,13 @@ export class SearchOnBing extends Workers {
 
     private oldBalance: number = this.bot.userData.currentPoints
 
+    private toAttributeMap(attributes: unknown): Record<string, unknown> {
+        if (!attributes || typeof attributes !== 'object' || Array.isArray(attributes)) {
+            return {}
+        }
+        return attributes as Record<string, unknown>
+    }
+
     constructor(bot: any) {
         super(bot)
     }
@@ -230,18 +237,19 @@ export class SearchOnBing extends Workers {
 
             const matched = allPromotions.find(x => {
                 const topLevelOfferId = String(x.offerId ?? '').toLowerCase()
-                const attrOfferId = String((x.attributes as any)?.offerid ?? '').toLowerCase()
+                const attrOfferId = String(this.toAttributeMap(x.attributes).offerid ?? '').toLowerCase()
                 return topLevelOfferId === offerKey || attrOfferId === offerKey
             })
             if (!matched) {
                 return { complete: false, pointProgress: 0, pointProgressMax: fallbackPointProgressMax }
             }
 
-            const attrProgress = Number((matched.attributes as any)?.progress ?? 0)
-            const attrMax = Number((matched.attributes as any)?.max ?? 0)
+            const attributes = this.toAttributeMap(matched.attributes)
+            const attrProgress = Number(attributes.progress ?? 0)
+            const attrMax = Number(attributes.max ?? 0)
             const pointProgress = Number(matched.pointProgress ?? attrProgress ?? 0)
             const pointProgressMax = Number(matched.pointProgressMax ?? attrMax ?? fallbackPointProgressMax ?? 0)
-            const attrCompleteRaw = (matched.attributes as any)?.complete
+            const attrCompleteRaw = attributes.complete
             const attrComplete =
                 typeof attrCompleteRaw === 'string'
                     ? attrCompleteRaw.toLowerCase() === 'true'
