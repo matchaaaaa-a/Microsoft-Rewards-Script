@@ -46,7 +46,11 @@ export default class BrowserFunc {
             }
             throw new Error('Dashboard data missing from API response')
         } catch (error) {
-            this.bot.logger.warn(this.bot.isMobile, 'GET-DASHBOARD-DATA', 'API failed, trying HTML fallback')
+            this.bot.logger.warn(
+                this.bot.isMobile,
+                'GET-DASHBOARD-DATA',
+                `API failed, trying HTML fallback | error=${error instanceof Error ? error.message : String(error)}`
+            )
 
             // Try using script from dashboard page
             try {
@@ -71,7 +75,11 @@ export default class BrowserFunc {
                 return JSON.parse(match[1]) as DashboardData
             } catch (fallbackError) {
                 // If both fail
-                this.bot.logger.error(this.bot.isMobile, 'GET-DASHBOARD-DATA', 'Failed to get dashboard data')
+                this.bot.logger.error(
+                    this.bot.isMobile,
+                    'GET-DASHBOARD-DATA',
+                    `Failed to get dashboard data | fallbackError=${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`
+                )
                 throw fallbackError
             }
         }
@@ -335,7 +343,8 @@ export default class BrowserFunc {
     }
 
     async closeBrowser(browser: BrowserContext, email: string) {
-        const rootBrowser = (browser as any).browser?.() || null
+        const browserWithRoot = browser as unknown as { browser?: () => { close: () => Promise<void> } | null }
+        const rootBrowser = browserWithRoot.browser?.() || null
 
         try {
             // Try to save cookies

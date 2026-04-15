@@ -225,7 +225,7 @@ export default class BrowserUtils {
             // Wait for selector to exist before clicking
             await page.waitForSelector(selector, { timeout: 10000 })
 
-            const cursor = createCursor(page as any)
+            const cursor = createCursor(page as unknown as Parameters<typeof createCursor>[0])
             await cursor.click(selector, options)
 
             return true

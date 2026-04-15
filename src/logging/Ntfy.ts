@@ -1,8 +1,14 @@
-import axios, { AxiosRequestConfig } from 'axios'
+import type { AxiosRequestConfig } from 'axios'
+import { Session } from 'httpcloak'
 import type { WebhookNtfyConfig } from '../interface/Config'
 import type { LogLevel } from './Logger'
 
 let ntfyQueuePromise: Promise<any> | null = null
+const webhookSession = new Session({
+    preset: 'chrome-146-windows',
+    timeout: 10,
+    retry: 3
+})
 
 async function getNtfyQueue(): Promise<any> {
     if (!ntfyQueuePromise) {
@@ -53,9 +59,18 @@ export async function sendNtfy(config: WebhookNtfyConfig, content: string, level
     const ntfyQueue = await getNtfyQueue()
     await ntfyQueue.add(async () => {
         try {
-            await axios(request)
+            const method = (request.method ?? 'POST').toUpperCase()
+            const response = await webhookSession.request(method, request.url as string, {
+                headers: request.headers as Record<string, string>,
+                timeout: request.timeout ? Math.max(1, Math.ceil(request.timeout / 1000)) : 10,
+                body: typeof request.data === 'string' ? request.data : String(request.data ?? '')
+            })
+
+            if (response.statusCode >= 400) {
+                throw new Error(`ntfy webhook failed with status ${response.statusCode}`)
+            }
         } catch (err: any) {
-            const status = err?.response?.status
+            const status = err?.response?.status ?? err?.statusCode
             if (status === 429) return
         }
     })

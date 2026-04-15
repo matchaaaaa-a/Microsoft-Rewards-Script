@@ -78,7 +78,7 @@ class Browser {
 
             const fingerprint = sessionData.fingerprint ?? (await this.generateFingerprint(this.bot.isMobile))
 
-            const context = await newInjectedContext(browser as any, {
+            const context = await newInjectedContext(browser as unknown as Parameters<typeof newInjectedContext>[0], {
                 fingerprint,
                 newContextOptions: {
                     permissions: [],

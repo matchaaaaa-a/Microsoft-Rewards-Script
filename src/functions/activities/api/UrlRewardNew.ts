@@ -271,9 +271,11 @@ export class UrlRewardNew extends Workers {
             } else {
                 const panelData: PanelFlyoutData | undefined = this.bot.panelData
                 const todayKey = this.bot.utils.getFormattedDate()
+                const panelMorePromotions = panelData?.flyoutResult?.morePromotions ?? []
+                const panelDailySetPromotions = panelData?.flyoutResult?.dailySetPromotions?.[todayKey] ?? []
                 const panelPromotion = panelData
-                    ? panelData.flyoutResult.morePromotions.find(p => p.offerId === offerId) ||
-                      panelData.flyoutResult.dailySetPromotions[todayKey]?.find(p => p.offerId === offerId)
+                    ? panelMorePromotions.find(p => p.offerId === offerId) ||
+                      panelDailySetPromotions.find(p => p.offerId === offerId)
                     : undefined
                 let authKey = panelPromotion?.hash
                 let activityType = panelPromotion?.activityType || 'urlreward'

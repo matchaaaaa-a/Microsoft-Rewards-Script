@@ -20,7 +20,7 @@ import Activities from './functions/Activities'
 import { SearchManager } from './functions/SearchManager'
 
 import type { Account } from './interface/Account'
-import AxiosClient from './util/Axios'
+import AxiosClient from './util/httpcloak'
 import { sendDiscord, flushDiscordQueue } from './logging/Discord'
 import { sendNtfy, flushNtfyQueue } from './logging/Ntfy'
 import type { DashboardData } from './interface/DashboardData'
@@ -48,11 +48,29 @@ interface AccountStats {
 }
 
 const executionContext = new AsyncLocalStorage<ExecutionContext>()
+const EMPTY_ACCOUNT: Account = {
+    email: '',
+    password: '',
+    recoveryEmail: '',
+    geoLocale: 'auto',
+    langCode: 'en',
+    proxy: {
+        proxyAxios: false,
+        url: '',
+        port: 0,
+        password: '',
+        username: ''
+    },
+    saveFingerprint: {
+        mobile: false,
+        desktop: false
+    }
+}
 
 export function getCurrentContext(): ExecutionContext {
     const context = executionContext.getStore()
     if (!context) {
-        return { isMobile: false, account: {} as any }
+        return { isMobile: false, account: EMPTY_ACCOUNT }
     }
     return context
 }

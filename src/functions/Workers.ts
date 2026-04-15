@@ -16,7 +16,7 @@ interface PanelMappedPromotionForSolver extends Partial<BasePromotion> {
     title: string
     complete: boolean
     promotionType: string
-    attributes: Record<string, any>
+    attributes: Record<string, unknown>
     destinationUrl: string
     exclusiveLockedFeatureStatus: NonNullable<BasePromotion['exclusiveLockedFeatureStatus']>
     pointProgressMax: number
@@ -37,6 +37,13 @@ export class Workers {
 
     constructor(bot: MicrosoftRewardsBot) {
         this.bot = bot
+    }
+
+    private getAttributes(attributes: unknown): Record<string, unknown> {
+        if (!attributes || typeof attributes !== 'object' || Array.isArray(attributes)) {
+            return {}
+        }
+        return attributes as Record<string, unknown>
     }
 
     public async doDailySet(data: DashboardData, page: Page) {
@@ -101,11 +108,12 @@ export class Workers {
         const activitiesUncompleted: BasePromotion[] =
             morePromotions?.filter(x => {
                 if (x?.complete) return false
-                const maxPoints = x?.pointProgressMax || Number((x.attributes as any)?.max) || 0
+                const attrs = this.getAttributes(x.attributes)
+                const maxPoints = x?.pointProgressMax || Number(attrs.max ?? 0) || 0
                 if (maxPoints <= 0 && x.exclusiveLockedFeatureStatus !== 'notsupported') return false
                 if (x.exclusiveLockedFeatureStatus === 'locked') return false
 
-                const type = x.promotionType || (x.attributes as any)?.type
+                const type = x.promotionType || String(attrs.type ?? '')
                 if (!type) return false
 
                 return true
@@ -253,7 +261,7 @@ export class Workers {
         const punchCards = data.punchCards ?? []
 
         const getLegacyChildType = (x: BasePromotion): string =>
-            (x.promotionType || (x.attributes as any)?.type || '').toLowerCase()
+            (x.promotionType || String(this.getAttributes(x.attributes).type ?? '') || '').toLowerCase()
 
         const isLegacyChildCandidate = (x: BasePromotion): boolean => {
             if (x?.complete) return false
@@ -421,7 +429,7 @@ export class Workers {
                         promotionType: 'urlreward',
                         complete: false,
                         exclusiveLockedFeatureStatus: 'unlocked',
-                        attributes: {} as any
+                        attributes: {}
                     } as BasePromotion)
                 }
             }
@@ -455,8 +463,8 @@ export class Workers {
             activity.linkText,
             punchCard.parentPromotion?.title,
             punchCard.parentPromotion?.description,
-            String((activity.attributes as any)?.description ?? ''),
-            String((activity.attributes as any)?.title ?? '')
+            String(this.getAttributes(activity.attributes).description ?? ''),
+            String(this.getAttributes(activity.attributes).title ?? '')
         ]
             .filter(Boolean)
             .join(' ')
@@ -480,7 +488,8 @@ export class Workers {
     private async solveActivities(activities: BasePromotion[], page: Page, punchCard?: PunchCard) {
         for (const activity of activities) {
             try {
-                const type = (activity.promotionType || (activity.attributes as any)?.type || '').toLowerCase()
+                const attrs = this.getAttributes(activity.attributes)
+                const type = (activity.promotionType || String(attrs.type ?? '') || '').toLowerCase()
                 const name = activity.name?.toLowerCase() ?? ''
                 const offerId = (activity as BasePromotion).offerId
                 const destinationUrl = activity.destinationUrl?.toLowerCase() ?? ''
@@ -540,7 +549,7 @@ export class Workers {
                         const isExploreOnBing =
                             name.includes('exploreonbing') ||
                             offerId.toLowerCase().includes('exploreonbing') ||
-                            (activity.attributes as any)?.isExploreOnBingTask === 'True' ||
+                            String(attrs.isExploreOnBingTask ?? '') === 'True' ||
                             titleLower.includes('search on bing') ||
                             descriptionLower.includes('search on bing') ||
                             destinationUrl.includes('search?q=') ||
@@ -548,6 +557,27 @@ export class Workers {
 
                         if (isExploreOnBing) {
                             if (isExtraSearchOffer) {
+                                const pointProgress = Number(basePromotion.pointProgress ?? attrs.progress ?? 0)
+                                const pointProgressMax = Number(basePromotion.pointProgressMax ?? attrs.max ?? 0)
+                                const completeRaw = attrs.complete
+                                const attrsComplete =
+                                    typeof completeRaw === 'string'
+                                        ? completeRaw.toLowerCase() === 'true'
+                                        : Boolean(completeRaw)
+                                const isAlreadyCompleted =
+                                    basePromotion.complete ||
+                                    attrsComplete ||
+                                    (pointProgressMax > 0 && pointProgress >= pointProgressMax)
+
+                                if (isAlreadyCompleted) {
+                                    this.bot.logger.info(
+                                        this.bot.isMobile,
+                                        'ACTIVITY',
+                                        `Skipping extra SearchOnBing activity already completed | title="${activity.title}" | offerId=${offerId} | progress=${pointProgress}/${pointProgressMax}`
+                                    )
+                                    break
+                                }
+
                                 this.bot.logger.info(
                                     this.bot.isMobile,
                                     'ACTIVITY',

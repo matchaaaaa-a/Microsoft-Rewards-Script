@@ -160,16 +160,16 @@ export class SearchOnBing extends Workers {
                     this.bot.userData.currentPoints = newBalance
                     this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + this.gainedPoints
 
-                    this.bot.logger.info(
-                        this.bot.isMobile,
-                        'SEARCH-ON-BING-SEARCH',
-                        `SearchOnBing query completed | query="${query}" | gainedPoints=${this.gainedPoints} | previousBalance=${newBalance - this.gainedPoints} | newBalance=${newBalance}`,
-                        'green'
-                    )
-
                     const completion = await this.checkActivityCompletionFromDashboard(
                         promotion.offerId,
                         Number(promotion.pointProgressMax ?? 0)
+                    )
+
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'SEARCH-ON-BING-SEARCH',
+                        `SearchOnBing query completed | query="${query}" | gainedPoints=${this.gainedPoints} | previousBalance=${newBalance - this.gainedPoints} | newBalance=${newBalance} | progress=${completion.pointProgress}/${completion.pointProgressMax}`,
+                        'green'
                     )
 
                     if (completion.complete) {
@@ -177,16 +177,11 @@ export class SearchOnBing extends Workers {
                         this.bot.logger.info(
                             this.bot.isMobile,
                             'SEARCH-ON-BING-SEARCH',
-                            `Search activity completed by dashboard progress | offerId=${promotion.offerId} | progress=${completion.pointProgress}/${completion.pointProgressMax}`
+                            `Extra Search Activity Completed | offerId=${promotion.offerId} | progress=${completion.pointProgress}/${completion.pointProgressMax}`
                         )
                         return
                     }
 
-                    this.bot.logger.info(
-                        this.bot.isMobile,
-                        'SEARCH-ON-BING-SEARCH',
-                        `Points gained but activity still incomplete, continuing searches | offerId=${promotion.offerId} | progress=${completion.pointProgress}/${completion.pointProgressMax}`
-                    )
                 } else {
                     this.bot.logger.warn(
                         this.bot.isMobile,
@@ -202,7 +197,6 @@ export class SearchOnBing extends Workers {
                 )
             } finally {
                 await this.bot.utils.wait(this.bot.utils.randomDelay(5000, 15000))
-                await page.goto(this.bot.config.baseURL, { timeout: 5000 }).catch(() => {})
             }
         }
 

@@ -1,4 +1,4 @@
-import axios from 'axios'
+import { Session } from 'httpcloak'
 import type { BrowserFingerprintWithHeaders } from 'fingerprint-generator'
 
 import type { ChromeVersion, EdgeVersion } from '../interface/UserAgentUtil'
@@ -6,6 +6,11 @@ import type { MicrosoftRewardsBot } from '../index'
 
 export class UserAgentManager {
     private static readonly NOT_A_BRAND_VERSION = '99'
+    private readonly httpSession = new Session({
+        preset: 'chrome-146-windows',
+        timeout: 15,
+        retry: 3
+    })
 
     constructor(private bot: MicrosoftRewardsBot) {}
 
@@ -41,19 +46,53 @@ export class UserAgentManager {
         return { userAgent: uaTemplate, userAgentMetadata: uaMetadata }
     }
 
+    private tryParseJson<T>(raw: string): T | null {
+        if (!raw || !raw.trim()) {
+            return null
+        }
+        try {
+            return JSON.parse(raw) as T
+        } catch {
+            return null
+        }
+    }
+
     async getChromeVersion(isMobile: boolean): Promise<string> {
         try {
+            const requestUrl = `https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions.json?t=${Date.now()}`
             const request = {
-                url: 'https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions.json',
+                url: requestUrl,
                 method: 'GET',
                 headers: {
-                    'Content-Type': 'application/json'
+                    'Content-Type': 'application/json',
+                    'Cache-Control': 'no-cache, no-store, max-age=0',
+                    Pragma: 'no-cache'
                 }
             }
 
-            const response = await axios(request)
-            const data: ChromeVersion = response.data
-            return data.channels.Stable.version
+            const response = await this.httpSession.get(request.url, {
+                headers: request.headers
+            })
+            this.bot.logger.debug(
+                isMobile,
+                'USERAGENT-CHROME-VERSION',
+                `Version endpoint response | status=${response.statusCode} | protocol=${response.protocol} | length=${response.text.length}`
+            )
+            const data =
+                this.tryParseJson<ChromeVersion>(response.text) ??
+                (() => {
+                    try {
+                        return response.json<ChromeVersion>()
+                    } catch {
+                        return null
+                    }
+                })()
+
+            const stableVersion = data?.channels?.Stable?.version
+            if (!stableVersion) {
+                throw new Error('Invalid Chrome versions payload')
+            }
+            return stableVersion
         } catch (error) {
             this.bot.logger.error(
                 isMobile,
@@ -74,12 +113,38 @@ export class UserAgentManager {
                 }
             }
 
-            const response = await axios(request)
-            const data: EdgeVersion[] = response.data
+            const response = await this.httpSession.get(request.url, {
+                headers: request.headers
+            })
+            this.bot.logger.debug(
+                isMobile,
+                'USERAGENT-EDGE-VERSION',
+                `Version endpoint response | status=${response.statusCode} | protocol=${response.protocol} | length=${response.text.length}`
+            )
+            const data =
+                this.tryParseJson<EdgeVersion[]>(response.text) ??
+                (() => {
+                    try {
+                        return response.json<EdgeVersion[]>()
+                    } catch {
+                        return null
+                    }
+                })()
+
+            if (!Array.isArray(data) || data.length === 0) {
+                throw new Error('Invalid Edge versions payload')
+            }
             const stable = data.find(x => x.Product == 'Stable') as EdgeVersion
+            const androidVersion =
+                stable?.Releases?.find(x => x.Platform == 'Android')?.ProductVersion
+            const windowsVersion =
+                stable?.Releases?.find(x => x.Platform == 'Windows' && x.Architecture == 'x64')?.ProductVersion
+            if (!androidVersion || !windowsVersion) {
+                throw new Error('Missing Edge version entries for Android/Windows')
+            }
             return {
-                android: stable.Releases.find(x => x.Platform == 'Android')?.ProductVersion,
-                windows: stable.Releases.find(x => x.Platform == 'Windows' && x.Architecture == 'x64')?.ProductVersion
+                android: androidVersion,
+                windows: windowsVersion
             }
         } catch (error) {
             this.bot.logger.error(
