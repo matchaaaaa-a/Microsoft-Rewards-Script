@@ -2,7 +2,6 @@ import type { AxiosRequestConfig } from 'axios'
 import type { Page } from 'patchright'
 import * as fs from 'fs'
 import path from 'path'
-import { GoogleGenAI } from '@google/genai'
 
 import { Workers } from '../../Workers'
 import { QueryCore } from '../../QueryEngine'
@@ -27,21 +26,32 @@ export class SearchOnBing extends Workers {
 
     private apiKeys: string[]
     private currentKeyIndex: number = 0
-    private geminiAI: GoogleGenAI
+    private geminiAI: any
+    private geminiReady: Promise<void>
 
     constructor(bot: any) {
         super(bot)
         this.apiKeys = resolveGeminiApiKeys(this.bot.config)
-        this.geminiAI = new GoogleGenAI({ apiKey: this.apiKeys[0] ?? '' })
+        this.geminiReady = this.createGeminiClient(this.apiKeys[0] ?? '')
     }
 
-    private rotateApiKey(): void {
+    private async createGeminiClient(apiKey: string): Promise<void> {
+        const mod = await import('@google/genai')
+        this.geminiAI = new mod.GoogleGenAI({ apiKey })
+    }
+
+    private async ensureGeminiReady(): Promise<void> {
+        await this.geminiReady
+    }
+
+    private async rotateApiKey(): Promise<void> {
         if (this.apiKeys.length === 0) {
             return
         }
         this.currentKeyIndex = (this.currentKeyIndex + 1) % this.apiKeys.length
         const newKey = this.apiKeys[this.currentKeyIndex]!
-        this.geminiAI = new GoogleGenAI({ apiKey: newKey })
+        this.geminiReady = this.createGeminiClient(newKey)
+        await this.geminiReady
         this.bot.logger.info(
             this.bot.isMobile,
             'SEARCH-ON-BING-GEMINI',
@@ -511,6 +521,7 @@ Output ONLY valid JSON array — nothing else — like this:
             attempt++
 
             try {
+                await this.ensureGeminiReady()
                 this.bot.logger.debug(
                     this.bot.isMobile,
                     'SEARCH-ON-BING-GEMINI',
@@ -563,7 +574,7 @@ Output ONLY valid JSON array — nothing else — like this:
                         'SEARCH-ON-BING-GEMINI',
                         `Rate limit detected, rotating API key... (Consecutive failures: ${consecutiveFailures})`
                     )
-                    this.rotateApiKey()
+                    await this.rotateApiKey()
                     consecutiveFailures = 0 // Reset consecutive failures for new key
 
                     // Brief wait before trying new key
@@ -578,7 +589,7 @@ Output ONLY valid JSON array — nothing else — like this:
                         'SEARCH-ON-BING-GEMINI',
                         `Too many consecutive failures (${consecutiveFailures}), rotating API key...`
                     )
-                    this.rotateApiKey()
+                    await this.rotateApiKey()
                     consecutiveFailures = 0 // Reset for new key
 
                     // Brief wait before trying new key

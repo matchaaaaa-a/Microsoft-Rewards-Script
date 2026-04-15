@@ -1,24 +1,34 @@
-import { GoogleGenAI } from '@google/genai'
 import type { MicrosoftRewardsBot } from '../index'
 import { resolveGeminiApiKeys } from '../util/geminiApiKeys'
 
 export class GeminiQueryEngine {
     private apiKeys: string[]
     private currentKeyIndex: number = 0
-    private ai: GoogleGenAI
+    private ai: any
+    private aiReady: Promise<void>
 
     constructor(private bot: MicrosoftRewardsBot) {
         this.apiKeys = resolveGeminiApiKeys(this.bot.config)
-        this.ai = new GoogleGenAI({ apiKey: this.apiKeys[0] ?? '' })
+        this.aiReady = this.createAiClient(this.apiKeys[0] ?? '')
     }
 
-    private rotateApiKey(): void {
+    private async createAiClient(apiKey: string): Promise<void> {
+        const mod = await import('@google/genai')
+        this.ai = new mod.GoogleGenAI({ apiKey })
+    }
+
+    private async ensureAiReady(): Promise<void> {
+        await this.aiReady
+    }
+
+    private async rotateApiKey(): Promise<void> {
         if (this.apiKeys.length === 0) {
             return
         }
         this.currentKeyIndex = (this.currentKeyIndex + 1) % this.apiKeys.length
         const newKey = this.apiKeys[this.currentKeyIndex]!
-        this.ai = new GoogleGenAI({ apiKey: newKey })
+        this.aiReady = this.createAiClient(newKey)
+        await this.aiReady
         this.bot.logger.info(
             this.bot.isMobile,
             'GEMINI-QUERY-ENGINE',
@@ -123,6 +133,7 @@ Ensure all 120 are unique, realistic searches that real people would actually ty
             attempt++
 
             try {
+                await this.ensureAiReady()
                 this.bot.logger.debug(
                     this.bot.isMobile,
                     'GEMINI-QUERY-ENGINE',
@@ -174,7 +185,7 @@ Ensure all 120 are unique, realistic searches that real people would actually ty
                         'GEMINI-QUERY-ENGINE',
                         `Rate limit detected, rotating API key... (Consecutive failures: ${consecutiveFailures})`
                     )
-                    this.rotateApiKey()
+                    await this.rotateApiKey()
                     consecutiveFailures = 0 // Reset consecutive failures for new key
 
                     // Brief wait before trying new key
@@ -189,7 +200,7 @@ Ensure all 120 are unique, realistic searches that real people would actually ty
                         'GEMINI-QUERY-ENGINE',
                         `Too many consecutive failures (${consecutiveFailures}), rotating API key...`
                     )
-                    this.rotateApiKey()
+                    await this.rotateApiKey()
                     consecutiveFailures = 0 // Reset for new key
 
                     // Brief wait before trying new key

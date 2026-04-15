@@ -1,5 +1,4 @@
 import axios, { AxiosRequestConfig } from 'axios'
-import PQueue from 'p-queue'
 import type { LogLevel } from './Logger'
 
 const DISCORD_LIMIT = 2000
@@ -9,11 +8,21 @@ export interface DiscordConfig {
     url: string
 }
 
-const discordQueue = new PQueue({
-    interval: 1000,
-    intervalCap: 2,
-    carryoverConcurrencyCount: true
-})
+let discordQueuePromise: Promise<any> | null = null
+
+async function getDiscordQueue(): Promise<any> {
+    if (!discordQueuePromise) {
+        discordQueuePromise = import('p-queue').then(mod =>
+            new mod.default({
+                interval: 1000,
+                intervalCap: 2,
+                carryoverConcurrencyCount: true
+            })
+        )
+    }
+
+    return discordQueuePromise
+}
 
 function truncate(text: string) {
     return text.length <= DISCORD_LIMIT ? text : text.slice(0, DISCORD_LIMIT - 14) + ' …(truncated)'
@@ -21,6 +30,7 @@ function truncate(text: string) {
 
 export async function sendDiscord(discordUrl: string, content: string, level: LogLevel): Promise<void> {
     if (!discordUrl) return
+    void level
 
     const request: AxiosRequestConfig = {
         method: 'POST',
@@ -30,6 +40,7 @@ export async function sendDiscord(discordUrl: string, content: string, level: Lo
         timeout: 10000
     }
 
+    const discordQueue = await getDiscordQueue()
     await discordQueue.add(async () => {
         try {
             await axios(request)
@@ -41,6 +52,7 @@ export async function sendDiscord(discordUrl: string, content: string, level: Lo
 }
 
 export async function flushDiscordQueue(timeoutMs = 5000): Promise<void> {
+    const discordQueue = await getDiscordQueue()
     await Promise.race([
         (async () => {
             await discordQueue.onIdle()

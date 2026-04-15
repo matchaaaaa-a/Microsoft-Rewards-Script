@@ -1,13 +1,22 @@
 import axios, { AxiosRequestConfig } from 'axios'
-import PQueue from 'p-queue'
 import type { WebhookNtfyConfig } from '../interface/Config'
 import type { LogLevel } from './Logger'
 
-const ntfyQueue = new PQueue({
-    interval: 1000,
-    intervalCap: 2,
-    carryoverConcurrencyCount: true
-})
+let ntfyQueuePromise: Promise<any> | null = null
+
+async function getNtfyQueue(): Promise<any> {
+    if (!ntfyQueuePromise) {
+        ntfyQueuePromise = import('p-queue').then(mod =>
+            new mod.default({
+                interval: 1000,
+                intervalCap: 2,
+                carryoverConcurrencyCount: true
+            })
+        )
+    }
+
+    return ntfyQueuePromise
+}
 
 export async function sendNtfy(config: WebhookNtfyConfig, content: string, level: LogLevel): Promise<void> {
     if (!config?.url) return
@@ -41,6 +50,7 @@ export async function sendNtfy(config: WebhookNtfyConfig, content: string, level
         timeout: 10000
     }
 
+    const ntfyQueue = await getNtfyQueue()
     await ntfyQueue.add(async () => {
         try {
             await axios(request)
@@ -52,6 +62,7 @@ export async function sendNtfy(config: WebhookNtfyConfig, content: string, level
 }
 
 export async function flushNtfyQueue(timeoutMs = 5000): Promise<void> {
+    const ntfyQueue = await getNtfyQueue()
     await Promise.race([
         (async () => {
             await ntfyQueue.onIdle()
