@@ -237,7 +237,7 @@ export class UrlRewardNew extends Workers {
             )
 
             const questId = this.buildQuestIdFromOfferId(offerId)
-            const useQuestFlow = !!questId
+            const useQuestFlow = this.bot.rewardsVersion === 'modern' && !!questId
             let responseStatus = 0
 
             if (useQuestFlow && questId) {
@@ -252,7 +252,7 @@ export class UrlRewardNew extends Workers {
                 let authKey = panelPromotion?.hash
                 let activityType = panelPromotion?.activityType || 'urlreward'
 
-                if (!authKey) {
+                if (!authKey && this.bot.rewardsVersion === 'modern') {
                     authKey = await this.resolvePunchCardHashFromQuest(offerId)
                     if (authKey) {
                         this.bot.logger.info(

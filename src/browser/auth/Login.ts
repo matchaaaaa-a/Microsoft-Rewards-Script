@@ -556,41 +556,13 @@ export class Login {
                 await page.goto(this.bot.config.baseURL, { waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {})
             }
 
-            const currentCookies = await page.context().cookies()
-            const cookieHeader = currentCookies.map(c => `${c.name}=${c.value}`).join('; ')
-
-            const request = {
-                url: 'https://rewards.bing.com/earn?_rsc=b1l97',
-                method: 'GET',
-                headers: {
-                    ...(this.bot.fingerprint?.headers ?? {}),
-                    accept: '*/*',
-                    rsc: '1',
-                    cookie: cookieHeader,
-                    referer: 'https://rewards.bing.com/earn',
-                    origin: 'https://rewards.bing.com'
-                }
-            }
-
-            const response = await this.bot.axios.request(request)
-            const responseText =
-                typeof response.data === 'string' ? response.data : JSON.stringify(response.data ?? {})
-            const isModern =
-                responseText.includes('"id":"quests"') ||
-                responseText.includes('/earn/quest/') ||
-                responseText.includes('self.__next_f.push')
-
+            await page.waitForLoadState('domcontentloaded', { timeout: 8000 }).catch(() => {})
+            const html = await page.content()
+            const isModern = html.includes('self.__next_f.push')
             this.bot.logger.debug(this.bot.isMobile, 'LOGIN', `Modern dashboard detection | nextFMarker=${isModern}`)
             return isModern
         } catch {
-            // Fallback to page marker check if the dedicated RSC request fails.
-            try {
-                await page.waitForLoadState('domcontentloaded', { timeout: 8000 }).catch(() => {})
-                const html = await page.content()
-                return html.includes('self.__next_f.push')
-            } catch {
-                return false
-            }
+            return false
         }
     }
 
