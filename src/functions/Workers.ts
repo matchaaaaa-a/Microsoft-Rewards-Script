@@ -9,9 +9,31 @@ import type {
     PurplePromotionalItem
 } from '../interface/DashboardData'
 import type { AppDashboardData } from '../interface/AppDashBoardData'
+import type { FlyoutPromotion } from '../interface/PanelFlyoutData'
+
+interface PanelMappedPromotionForSolver extends Partial<BasePromotion> {
+    offerId: string
+    title: string
+    complete: boolean
+    promotionType: string
+    attributes: Record<string, any>
+    destinationUrl: string
+    exclusiveLockedFeatureStatus: NonNullable<BasePromotion['exclusiveLockedFeatureStatus']>
+    pointProgressMax: number
+    pointProgress: number
+    activityProgress: number
+    activityProgressMax: number
+    name?: string
+    description?: string
+    linkText?: string
+    hash?: string
+}
 
 export class Workers {
     public bot: MicrosoftRewardsBot
+    private readonly extraSearchOfferIds = new Set([
+        'ww_rewards_banner_search_april_202604'
+    ])
 
     constructor(bot: MicrosoftRewardsBot) {
         this.bot = bot
@@ -36,22 +58,43 @@ export class Workers {
     }
 
     public async doMorePromotions(data: DashboardData, page: Page) {
-        const morePromotions: BasePromotion[] = [
-            ...new Map(
-                [...(data.morePromotions ?? []), ...(data.morePromotionsWithoutPromotionalItems ?? [])]
-                    .filter(Boolean)
-                    .map(p => [p.offerId, p as BasePromotion] as const)
-            ).values()
-        ]
+        const panelMorePromotions = this.bot.panelData?.flyoutResult?.morePromotions ?? []
+        const mapPanelPromotion = (p: FlyoutPromotion): BasePromotion =>
+            ({
+                ...p,
+                // Some panel payloads use activityType while solver expects promotionType.
+                promotionType: p.promotionType || p.activityType || 'urlreward',
+                attributes: p.attributes ?? {},
+                destinationUrl: p.destinationUrl ?? '',
+                exclusiveLockedFeatureStatus: p.exclusiveLockedFeatureStatus ?? 'unlocked',
+                pointProgressMax: Number(p.pointProgressMax ?? 0),
+                pointProgress: Number(p.pointProgress ?? 0),
+                activityProgress: Number(p.activityProgress ?? 0),
+                activityProgressMax: Number(p.activityProgressMax ?? 0)
+            } as PanelMappedPromotionForSolver) as BasePromotion
 
-        // Debug: log all promotions before filtering
-        for (const p of morePromotions) {
-            const type = p.promotionType || (p.attributes as any)?.type || 'none'
-            const maxPoints = p?.pointProgressMax || Number((p.attributes as any)?.max) || 0
-            this.bot.logger.info(
+        const morePromotions: BasePromotion[] =
+            panelMorePromotions.length > 0
+                ? [...new Map(panelMorePromotions.filter(Boolean).map(p => [p.offerId, mapPanelPromotion(p)] as const)).values()]
+                : [
+                      ...new Map(
+                          [...(data.morePromotions ?? []), ...(data.morePromotionsWithoutPromotionalItems ?? [])]
+                              .filter(Boolean)
+                              .map(p => [p.offerId, p as BasePromotion] as const)
+                      ).values()
+                  ]
+
+        if (panelMorePromotions.length > 0) {
+            this.bot.logger.debug(
                 this.bot.isMobile,
                 'MORE-PROMOTIONS',
-                `Raw promotion | offerId=${p.offerId} | complete=${p.complete} | type=${type} | promotionType=${p.promotionType} | pointProgressMax=${p.pointProgressMax} | attrMax=${(p.attributes as any)?.max} | maxPoints=${maxPoints} | locked=${p.exclusiveLockedFeatureStatus}`
+                `Using panel flyout source for more promotions | count=${morePromotions.length}`
+            )
+        } else {
+            this.bot.logger.debug(
+                this.bot.isMobile,
+                'MORE-PROMOTIONS',
+                `Panel flyout source unavailable, using dashboard source | count=${morePromotions.length}`
             )
         }
 
@@ -207,20 +250,25 @@ export class Workers {
             return
         }
 
-        const punchCards =
-            data.punchCards?.filter(
-                x => !x.parentPromotion?.complete && (x.parentPromotion?.pointProgressMax ?? 0) > 0
-            ) ?? []
+        const punchCards = data.punchCards ?? []
+
+        const getLegacyChildType = (x: BasePromotion): string =>
+            (x.promotionType || (x.attributes as any)?.type || '').toLowerCase()
+
+        const isLegacyChildCandidate = (x: BasePromotion): boolean => {
+            if (x?.complete) return false
+            if (x?.exclusiveLockedFeatureStatus === 'locked') return false
+
+            // Some legacy payloads have missing/empty promotionType while still being valid punchcard children.
+            const type = getLegacyChildType(x)
+            if (type) return true
+
+            return /_pcchild\d+_/i.test(x.offerId ?? '')
+        }
 
         const totalActivitiesUncompleted = punchCards.reduce((count, punchCard) => {
             const uncompleted =
-                punchCard.childPromotions?.filter(x => {
-                    if (x?.complete) return false
-                    if (x?.exclusiveLockedFeatureStatus === 'locked') return false
-                    if (!x.promotionType) return false
-
-                    return true
-                }) ?? []
+                punchCard.childPromotions?.filter(x => isLegacyChildCandidate(x as BasePromotion)) ?? []
             return count + uncompleted.length
         }, 0)
 
@@ -237,13 +285,7 @@ export class Workers {
 
         for (const punchCard of punchCards) {
             const activitiesUncompleted: BasePromotion[] =
-                punchCard.childPromotions?.filter(x => {
-                    if (x?.complete) return false
-                    if (x?.exclusiveLockedFeatureStatus === 'locked') return false
-                    if (!x.promotionType) return false
-
-                    return true
-                }) ?? []
+                punchCard.childPromotions?.filter(x => isLegacyChildCandidate(x as BasePromotion)) ?? []
 
             if (!activitiesUncompleted.length) {
                 continue
@@ -401,6 +443,7 @@ export class Workers {
         }
     }
 
+
     private shouldSkipTimeGatedPunchCardActivity(activity: BasePromotion, punchCard?: PunchCard): boolean {
         if (!punchCard) {
             return false
@@ -491,12 +534,33 @@ export class Workers {
                         const basePromotion = activity as BasePromotion
 
                         // Search on Bing are subtypes of "urlreward"
+                        const titleLower = activity.title?.toLowerCase() ?? ''
+                        const descriptionLower = activity.description?.toLowerCase() ?? ''
+                        const isExtraSearchOffer = this.extraSearchOfferIds.has(offerId.toLowerCase())
                         const isExploreOnBing =
                             name.includes('exploreonbing') ||
+                            offerId.toLowerCase().includes('exploreonbing') ||
                             (activity.attributes as any)?.isExploreOnBingTask === 'True' ||
-                            destinationUrl.includes('search?q=')
+                            titleLower.includes('search on bing') ||
+                            descriptionLower.includes('search on bing') ||
+                            destinationUrl.includes('search?q=') ||
+                            isExtraSearchOffer
 
                         if (isExploreOnBing) {
+                            if (isExtraSearchOffer) {
+                                this.bot.logger.info(
+                                    this.bot.isMobile,
+                                    'ACTIVITY',
+                                    `Detected extra search offer, forcing SearchOnBing flow | offerId=${offerId}`
+                                )
+                                this.bot.logger.info(
+                                    this.bot.isMobile,
+                                    'ACTIVITY',
+                                    `Found activity type "SearchOnBing" | title="${activity.title}" | offerId=${offerId}`
+                                )
+                                await this.bot.activities.doSearchOnBing(basePromotion, page)
+                                break
+                            }
                             // First try to activate via reportactivity API (some exploreonbing tasks only need activation)
                             if (this.bot.requestToken && !isPunchCardChildOffer) {
                                 this.bot.logger.info(
@@ -614,15 +678,26 @@ export class Workers {
                                 )
 
                                 try {
+                                    const balanceBefore = Number(this.bot.userData.currentPoints ?? 0)
                                     await this.bot.activities.doDaily(basePromotion)
+                                    const balanceAfter = Number(this.bot.userData.currentPoints ?? balanceBefore)
+                                    const gained = balanceAfter - balanceBefore
 
-                                    this.bot.logger.info(
+                                    if (gained > 0) {
+                                        this.bot.logger.info(
+                                            this.bot.isMobile,
+                                            'ACTIVITY',
+                                            `Completed exploreonbing via panel flyout | offerId=${offerId} | gainedPoints=${gained}`,
+                                            'green'
+                                        )
+                                        break
+                                    }
+
+                                    this.bot.logger.warn(
                                         this.bot.isMobile,
                                         'ACTIVITY',
-                                        `Completed exploreonbing via panel flyout | offerId=${offerId}`,
-                                        'green'
+                                        `Panel flyout did not gain points for exploreonbing | offerId=${offerId} | oldBalance=${balanceBefore} | newBalance=${balanceAfter}`
                                     )
-                                    break
                                 } catch (panelError) {
                                     this.bot.logger.warn(
                                         this.bot.isMobile,
@@ -647,7 +722,6 @@ export class Workers {
                                 `Found activity type "UrlReward" | title="${activity.title}" | offerId=${offerId}`
                             )
 
-                            const isPunchCardChildOffer = /_pcchild\d+_/i.test(offerId)
                             if (isPunchCardChildOffer) {
                                 await this.bot.activities.doDaily(basePromotion)
                             } else if (this.bot.requestToken) {
