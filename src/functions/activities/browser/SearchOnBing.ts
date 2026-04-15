@@ -561,7 +561,7 @@ Output ONLY valid JSON array — nothing else — like this:
                 const errorMessage = error instanceof Error ? error.message : String(error)
                 consecutiveFailures++
 
-                this.bot.logger.warn(
+                this.bot.logger.debug(
                     this.bot.isMobile,
                     'SEARCH-ON-BING-GEMINI',
                     `Attempt ${attempt} failed for "${activityTitle}" (Key ${this.currentKeyIndex + 1}/${this.apiKeys.length}): ${errorMessage}`
@@ -569,7 +569,7 @@ Output ONLY valid JSON array — nothing else — like this:
 
                 // Check if this is a rate limit error
                 if (this.isRateLimitError(error)) {
-                    this.bot.logger.info(
+                    this.bot.logger.debug(
                         this.bot.isMobile,
                         'SEARCH-ON-BING-GEMINI',
                         `Rate limit detected, rotating API key... (Consecutive failures: ${consecutiveFailures})`
@@ -584,7 +584,7 @@ Output ONLY valid JSON array — nothing else — like this:
 
                 // For other errors, rotate key after max consecutive failures
                 if (consecutiveFailures >= maxConsecutiveFailures) {
-                    this.bot.logger.info(
+                    this.bot.logger.debug(
                         this.bot.isMobile,
                         'SEARCH-ON-BING-GEMINI',
                         `Too many consecutive failures (${consecutiveFailures}), rotating API key...`
@@ -598,7 +598,7 @@ Output ONLY valid JSON array — nothing else — like this:
                 }
 
                 // Wait before retrying with same key
-                this.bot.logger.info(
+                this.bot.logger.debug(
                     this.bot.isMobile,
                     'SEARCH-ON-BING-GEMINI',
                     `Waiting 30 seconds before retry ${attempt + 1}...`

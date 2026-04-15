@@ -172,7 +172,7 @@ Ensure all 120 are unique, realistic searches that real people would actually ty
                 const errorMessage = error instanceof Error ? error.message : String(error)
                 consecutiveFailures++
 
-                this.bot.logger.warn(
+                this.bot.logger.debug(
                     this.bot.isMobile,
                     'GEMINI-QUERY-ENGINE',
                     `Attempt ${attempt} failed (Key ${this.currentKeyIndex + 1}/${this.apiKeys.length}): ${errorMessage}`
@@ -180,7 +180,7 @@ Ensure all 120 are unique, realistic searches that real people would actually ty
 
                 // Check if this is a rate limit error
                 if (this.isRateLimitError(error)) {
-                    this.bot.logger.info(
+                    this.bot.logger.debug(
                         this.bot.isMobile,
                         'GEMINI-QUERY-ENGINE',
                         `Rate limit detected, rotating API key... (Consecutive failures: ${consecutiveFailures})`
@@ -195,7 +195,7 @@ Ensure all 120 are unique, realistic searches that real people would actually ty
 
                 // For other errors, rotate key after max consecutive failures
                 if (consecutiveFailures >= maxConsecutiveFailures) {
-                    this.bot.logger.info(
+                    this.bot.logger.debug(
                         this.bot.isMobile,
                         'GEMINI-QUERY-ENGINE',
                         `Too many consecutive failures (${consecutiveFailures}), rotating API key...`
@@ -209,7 +209,7 @@ Ensure all 120 are unique, realistic searches that real people would actually ty
                 }
 
                 // Wait before retrying with same key
-                this.bot.logger.info(
+                this.bot.logger.debug(
                     this.bot.isMobile,
                     'GEMINI-QUERY-ENGINE',
                     `Waiting 30 seconds before retry ${attempt + 1}...`
