@@ -17,6 +17,7 @@ export class SearchOnBing extends Workers {
     private gainedPoints: number = 0
 
     private success: boolean = false
+    private gainedAnyPoints: boolean = false
 
     private oldBalance: number = this.bot.userData.currentPoints
 
@@ -27,6 +28,8 @@ export class SearchOnBing extends Workers {
     public async doSearchOnBing(promotion: BasePromotion, page: Page) {
         const offerId = promotion.offerId
         this.oldBalance = Number(this.bot.userData.currentPoints ?? 0)
+        this.success = false
+        this.gainedAnyPoints = false
 
         this.bot.logger.info(
             this.bot.isMobile,
@@ -68,13 +71,19 @@ export class SearchOnBing extends Workers {
             const queries = await this.getSearchQueries(promotion)
 
             // Run through the queries
-            await this.searchBing(page, queries)
+            await this.searchBing(page, queries, promotion)
 
             if (this.success) {
                 this.bot.logger.info(
                     this.bot.isMobile,
                     'SEARCH-ON-BING',
                     `Completed SearchOnBing | offerId=${offerId} | startBalance=${this.oldBalance} | finalBalance=${this.bot.userData.currentPoints}`
+                )
+            } else if (this.gainedAnyPoints) {
+                this.bot.logger.warn(
+                    this.bot.isMobile,
+                    'SEARCH-ON-BING',
+                    `SearchOnBing gained points but activity is still incomplete | offerId=${offerId} | startBalance=${this.oldBalance} | finalBalance=${this.bot.userData.currentPoints}`
                 )
             } else {
                 this.bot.logger.warn(
@@ -92,13 +101,14 @@ export class SearchOnBing extends Workers {
         }
     }
 
-    private async searchBing(page: Page, queries: string[]) {
+    private async searchBing(page: Page, queries: string[], promotion: BasePromotion) {
         queries = [...new Set(queries)]
+        let lastBalance = this.oldBalance
 
         this.bot.logger.debug(
             this.bot.isMobile,
             'SEARCH-ON-BING-SEARCH',
-            `Starting search loop | queriesCount=${queries.length} | oldBalance=${this.oldBalance}`
+            `Starting search loop | queriesCount=${queries.length} | startBalance=${this.oldBalance}`
         )
 
         let i = 0
@@ -129,27 +139,47 @@ export class SearchOnBing extends Workers {
 
                 // Check for point updates
                 const newBalance = await this.bot.browser.func.getCurrentPoints()
-                this.gainedPoints = newBalance - this.oldBalance
+                this.gainedPoints = newBalance - lastBalance
 
                 this.bot.logger.debug(
                     this.bot.isMobile,
                     'SEARCH-ON-BING-SEARCH',
-                    `Balance check after query | query="${query}" | oldBalance=${this.oldBalance} | newBalance=${newBalance} | gainedPoints=${this.gainedPoints}`
+                    `Balance check after query | query="${query}" | previousBalance=${lastBalance} | newBalance=${newBalance} | gainedPoints=${this.gainedPoints}`
                 )
+                lastBalance = newBalance
 
                 if (this.gainedPoints > 0) {
+                    this.gainedAnyPoints = true
                     this.bot.userData.currentPoints = newBalance
                     this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + this.gainedPoints
 
                     this.bot.logger.info(
                         this.bot.isMobile,
                         'SEARCH-ON-BING-SEARCH',
-                        `SearchOnBing query completed | query="${query}" | gainedPoints=${this.gainedPoints} | oldBalance=${this.oldBalance} | newBalance=${newBalance}`,
+                        `SearchOnBing query completed | query="${query}" | gainedPoints=${this.gainedPoints} | previousBalance=${newBalance - this.gainedPoints} | newBalance=${newBalance}`,
                         'green'
                     )
 
-                    this.success = true
-                    return
+                    const completion = await this.checkActivityCompletionFromDashboard(
+                        promotion.offerId,
+                        Number(promotion.pointProgressMax ?? 0)
+                    )
+
+                    if (completion.complete) {
+                        this.success = true
+                        this.bot.logger.info(
+                            this.bot.isMobile,
+                            'SEARCH-ON-BING-SEARCH',
+                            `Search activity completed by dashboard progress | offerId=${promotion.offerId} | progress=${completion.pointProgress}/${completion.pointProgressMax}`
+                        )
+                        return
+                    }
+
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'SEARCH-ON-BING-SEARCH',
+                        `Points gained but activity still incomplete, continuing searches | offerId=${promotion.offerId} | progress=${completion.pointProgress}/${completion.pointProgressMax}`
+                    )
                 } else {
                     this.bot.logger.warn(
                         this.bot.isMobile,
@@ -172,8 +202,61 @@ export class SearchOnBing extends Workers {
         this.bot.logger.warn(
             this.bot.isMobile,
             'SEARCH-ON-BING-SEARCH',
-            `Finished all queries with no points gained | queriesTried=${queries.length} | oldBalance=${this.oldBalance} | finalBalance=${this.bot.userData.currentPoints}`
+            `Finished all queries without completing activity | queriesTried=${queries.length} | startBalance=${this.oldBalance} | finalBalance=${this.bot.userData.currentPoints}`
         )
+    }
+
+    private async checkActivityCompletionFromDashboard(
+        offerId: string,
+        fallbackPointProgressMax: number
+    ): Promise<{ complete: boolean; pointProgress: number; pointProgressMax: number }> {
+        try {
+            const data = await this.bot.browser.func.getDashboardData()
+            const offerKey = offerId.toLowerCase()
+
+            const dailySetPromotions = Object.values(data.dailySetPromotions ?? {}).flat()
+            const punchCardPromotions = (data.punchCards ?? []).flatMap(x => [
+                ...(x.childPromotions ?? []),
+                ...(x.parentPromotion ? [x.parentPromotion] : [])
+            ])
+
+            const allPromotions = [
+                ...(data.morePromotions ?? []),
+                ...(data.morePromotionsWithoutPromotionalItems ?? []),
+                ...(data.promotionalItems ?? []),
+                ...dailySetPromotions,
+                ...punchCardPromotions
+            ]
+
+            const matched = allPromotions.find(x => {
+                const topLevelOfferId = String(x.offerId ?? '').toLowerCase()
+                const attrOfferId = String((x.attributes as any)?.offerid ?? '').toLowerCase()
+                return topLevelOfferId === offerKey || attrOfferId === offerKey
+            })
+            if (!matched) {
+                return { complete: false, pointProgress: 0, pointProgressMax: fallbackPointProgressMax }
+            }
+
+            const attrProgress = Number((matched.attributes as any)?.progress ?? 0)
+            const attrMax = Number((matched.attributes as any)?.max ?? 0)
+            const pointProgress = Number(matched.pointProgress ?? attrProgress ?? 0)
+            const pointProgressMax = Number(matched.pointProgressMax ?? attrMax ?? fallbackPointProgressMax ?? 0)
+            const attrCompleteRaw = (matched.attributes as any)?.complete
+            const attrComplete =
+                typeof attrCompleteRaw === 'string'
+                    ? attrCompleteRaw.toLowerCase() === 'true'
+                    : Boolean(attrCompleteRaw)
+            const complete = Boolean(matched.complete) || attrComplete || (pointProgressMax > 0 && pointProgress >= pointProgressMax)
+
+            return { complete, pointProgress, pointProgressMax }
+        } catch (error) {
+            this.bot.logger.debug(
+                this.bot.isMobile,
+                'SEARCH-ON-BING-SEARCH',
+                `Dashboard completion check failed | offerId=${offerId} | error=${error instanceof Error ? error.message : String(error)}`
+            )
+            return { complete: false, pointProgress: 0, pointProgressMax: fallbackPointProgressMax }
+        }
     }
 
     private async getSearchQueries(promotion: BasePromotion): Promise<string[]> {
