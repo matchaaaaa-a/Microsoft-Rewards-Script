@@ -122,6 +122,32 @@ export class UrlRewardNew extends Workers {
         return match[1]
     }
 
+    private async resolveHashFromDashboardPunchCards(offerId: string): Promise<string | undefined> {
+        try {
+            const dashboardData = await this.bot.browser.func.getDashboardData()
+            const punchCards = dashboardData?.punchCards ?? []
+
+            for (const card of punchCards) {
+                const children = card?.childPromotions ?? []
+                const child = children.find(
+                    promotion => promotion?.offerId === offerId || promotion?.name === offerId
+                )
+                const hash = child?.hash
+                if (hash) {
+                    return hash
+                }
+            }
+        } catch (error) {
+            this.bot.logger.debug(
+                this.bot.isMobile,
+                'URL-REWARD',
+                `Dashboard punchcard hash lookup failed | offerId=${offerId} | message=${error instanceof Error ? error.message : String(error)}`
+            )
+        }
+
+        return undefined
+    }
+
     private async submitModernPunchCardQuestAction(offerId: string, questId: string): Promise<number> {
         const stateTreeGet = this.buildStateTree(questId)
         const stateTreePost = this.buildStateTree(questId, true)
@@ -264,10 +290,21 @@ export class UrlRewardNew extends Workers {
                 }
 
                 if (!authKey) {
+                    authKey = await this.resolveHashFromDashboardPunchCards(offerId)
+                    if (authKey) {
+                        this.bot.logger.info(
+                            this.bot.isMobile,
+                            'URL-REWARD',
+                            `Resolved hash via dashboard punchcards | offerId=${offerId}`
+                        )
+                    }
+                }
+
+                if (!authKey) {
                     this.bot.logger.warn(
                         this.bot.isMobile,
                         'URL-REWARD',
-                        `Promotion hash not found in panel or quest data | offerId=${offerId}`
+                        `Promotion hash not found in panel, quest, or dashboard punchcards | offerId=${offerId}`
                     )
                     return
                 }
