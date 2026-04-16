@@ -12,7 +12,15 @@ export class UrlReward extends Workers {
     private oldBalance: number = this.bot.userData.currentPoints
 
     public async doUrlReward(promotion: BasePromotion) {
-        const offerId = promotion.offerId
+        const offerId = String(promotion.offerId ?? '').trim()
+        if (!offerId) {
+            this.bot.logger.warn(
+                this.bot.isMobile,
+                'URL-REWARD',
+                `Skipping UrlReward due to missing offerId | title="${promotion.title ?? ''}"`
+            )
+            return
+        }
 
         this.bot.logger.info(
             this.bot.isMobile,
@@ -42,7 +50,7 @@ export class UrlReward extends Workers {
             let success = false
 
             // Try primary method with RequestVerificationToken first
-            if (this.bot.requestToken) {
+            if (this.bot.requestToken && promotion.hash) {
                 this.bot.logger.debug(this.bot.isMobile, 'URL-REWARD', 'Trying primary method with RequestVerificationToken')
 
                 const formData = new URLSearchParams({
@@ -61,6 +69,8 @@ export class UrlReward extends Workers {
                     method: 'POST',
                     headers: {
                         ...(this.bot.fingerprint?.headers ?? {}),
+                        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                        'X-Requested-With': 'XMLHttpRequest',
                         Cookie: this.cookieHeader,
                         Referer: 'https://rewards.bing.com/',
                         Origin: 'https://rewards.bing.com'
@@ -85,12 +95,27 @@ export class UrlReward extends Workers {
                     )
 
                 } catch (primaryError) {
+                    const maybeResponse = primaryError as { response?: { status?: number; data?: unknown } }
+                    const status = maybeResponse.response?.status
+                    const responseData = maybeResponse.response?.data
+                    const bodySnippet =
+                        typeof responseData === 'string'
+                            ? responseData.slice(0, 300)
+                            : responseData && typeof responseData === 'object'
+                              ? JSON.stringify(responseData).slice(0, 300)
+                              : ''
                     this.bot.logger.debug(
                         this.bot.isMobile,
                         'URL-REWARD',
-                        `Primary method failed, trying dashboard fallback | offerId=${offerId} | error=${primaryError instanceof Error ? primaryError.message : String(primaryError)}`
+                        `Primary method failed, trying dashboard fallback | offerId=${offerId} | status=${status ?? 'n/a'} | error=${primaryError instanceof Error ? primaryError.message : String(primaryError)}${bodySnippet ? ` | body=${bodySnippet}` : ''}`
                     )
                 }
+            } else if (!promotion.hash) {
+                this.bot.logger.debug(
+                    this.bot.isMobile,
+                    'URL-REWARD',
+                    `Skipping primary method, missing promotion hash | offerId=${offerId}`
+                )
             }
 
             // If primary method failed or no token, try dashboard method

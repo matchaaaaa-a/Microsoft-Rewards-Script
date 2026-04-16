@@ -1,4 +1,4 @@
-import type { BrowserContext, Cookie } from 'patchright'
+import type { BrowserContext, Cookie, Page } from 'patchright'
 import type { AxiosRequestConfig, AxiosResponse } from 'axios'
 
 import type { MicrosoftRewardsBot } from '../index'
@@ -18,70 +18,173 @@ export default class BrowserFunc {
         this.bot = bot
     }
 
+    private formatError(error: unknown): string {
+        return error instanceof Error ? error.message : String(error)
+    }
+
+    private extractDashboardJson(html: string): string {
+        const marker = 'var dashboard ='
+        const markerIndex = html.indexOf(marker)
+        if (markerIndex === -1) {
+            throw new Error('Dashboard script marker not found in HTML')
+        }
+
+        const start = html.indexOf('{', markerIndex)
+        if (start === -1) {
+            throw new Error('Dashboard JSON start not found in HTML')
+        }
+
+        let depth = 0
+        let inString = false
+        let stringQuote = ''
+        let escaped = false
+
+        for (let i = start; i < html.length; i++) {
+            const char = html[i]
+
+            if (inString) {
+                if (escaped) {
+                    escaped = false
+                } else if (char === '\\') {
+                    escaped = true
+                } else if (char === stringQuote) {
+                    inString = false
+                    stringQuote = ''
+                }
+                continue
+            }
+
+            if (char === '"' || char === "'") {
+                inString = true
+                stringQuote = char
+                continue
+            }
+
+            if (char === '{') {
+                depth++
+            } else if (char === '}') {
+                depth--
+                if (depth === 0) {
+                    return html.slice(start, i + 1)
+                }
+            }
+        }
+
+        throw new Error('Dashboard JSON end not found in HTML')
+    }
+
     /**
      * Fetch user desktop dashboard data
      * @returns {DashboardData} Object of user bing rewards dashboard data
      */
     async getDashboardData(): Promise<DashboardData> {
         try {
-            const request: AxiosRequestConfig = {
-                url: 'https://rewards.bing.com/api/getuserinfo?type=1',
-                method: 'GET',
-                headers: {
-                    ...(this.bot.fingerprint?.headers ?? {}),
-                    Cookie: this.buildCookieHeader(this.bot.cookies.mobile, [
-                        'bing.com',
-                        'live.com',
-                        'microsoftonline.com'
-                    ]),
-                    Referer: 'https://rewards.bing.com/',
-                    Origin: 'https://rewards.bing.com'
-                }
-            }
-
-            const response = await this.bot.axios.request(request)
-
-            if (response.data?.dashboard) {
-                return response.data.dashboard as DashboardData
-            }
-            throw new Error('Dashboard data missing from API response')
-        } catch (error) {
-            this.bot.logger.warn(
-                this.bot.isMobile,
-                'GET-DASHBOARD-DATA',
-                `API failed, trying HTML fallback | error=${error instanceof Error ? error.message : String(error)}`
-            )
-
-            // Try using script from dashboard page
-            try {
+            if (this.bot.rewardsVersion === 'modern') {
                 const request: AxiosRequestConfig = {
-                    url: this.bot.config.baseURL,
+                    url: 'https://rewards.bing.com/api/getuserinfo?type=1',
                     method: 'GET',
                     headers: {
                         ...(this.bot.fingerprint?.headers ?? {}),
-                        Cookie: this.buildCookieHeader(this.bot.cookies.mobile),
+                        Cookie: this.buildCookieHeader(this.bot.cookies.mobile, [
+                            'bing.com',
+                            'live.com',
+                            'microsoftonline.com'
+                        ]),
+                        'Cache-Control': 'no-cache, no-store, max-age=0',
+                        Pragma: 'no-cache',
                         Referer: 'https://rewards.bing.com/',
                         Origin: 'https://rewards.bing.com'
                     }
                 }
 
                 const response = await this.bot.axios.request(request)
-                const match = response.data.match(/var\s+dashboard\s*=\s*({.*?});/s)
-
-                if (!match?.[1]) {
-                    throw new Error('Dashboard script not found in HTML')
+                if (response.data?.dashboard) {
+                    return response.data.dashboard as DashboardData
                 }
+                throw new Error('Modern getuserinfo response missing dashboard')
+            }
 
-                return JSON.parse(match[1]) as DashboardData
-            } catch (fallbackError) {
-                // If both fail
-                this.bot.logger.error(
+            const targetUrl = `${this.bot.config.baseURL}?_=${Date.now()}`
+            let html = ''
+            const page: Page | undefined = this.bot.isMobile ? this.bot.mainMobilePage : this.bot.mainDesktopPage
+
+            if (!page || page.isClosed()) {
+                this.bot.logger.debug(
                     this.bot.isMobile,
                     'GET-DASHBOARD-DATA',
-                    `Failed to get dashboard data | fallbackError=${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`
+                    'Dashboard page unavailable, using HTTP HTML fallback'
                 )
-                throw fallbackError
+
+                const response = await this.bot.axios.request({
+                    url: targetUrl,
+                    method: 'GET',
+                    headers: {
+                        ...(this.bot.fingerprint?.headers ?? {}),
+                        Cookie: this.buildCookieHeader(this.bot.cookies.mobile, [
+                            'bing.com',
+                            'live.com',
+                            'microsoftonline.com'
+                        ]),
+                        'Cache-Control': 'no-cache, no-store, max-age=0',
+                        Pragma: 'no-cache',
+                        Referer: 'https://rewards.bing.com/',
+                        Origin: 'https://rewards.bing.com'
+                    }
+                })
+                html = typeof response.data === 'string' ? response.data : String(response.data ?? '')
+            } else {
+                try {
+                    const response = await page.context().request.get(targetUrl, {
+                        failOnStatusCode: false,
+                        headers: {
+                            'Cache-Control': 'no-cache, no-store, max-age=0',
+                            Pragma: 'no-cache',
+                            Referer: 'https://rewards.bing.com/'
+                        }
+                    })
+
+                    if (!response.ok()) {
+                        throw new Error(`Browser context request failed with status ${response.status()}`)
+                    }
+
+                    html = await response.text()
+                } catch (contextRequestError) {
+                    this.bot.logger.debug(
+                        this.bot.isMobile,
+                        'GET-DASHBOARD-DATA',
+                        `Context request failed, trying page fetch fallback | error=${this.formatError(contextRequestError)}`
+                    )
+
+                    html = await page.evaluate(async ({ baseUrl, nonce }) => {
+                        const response = await fetch(`${baseUrl}?_=${nonce}`, {
+                            method: 'GET',
+                            credentials: 'include',
+                            cache: 'no-store',
+                            headers: {
+                                'Cache-Control': 'no-cache, no-store, max-age=0',
+                                Pragma: 'no-cache'
+                            }
+                        })
+
+                        if (!response.ok) {
+                            throw new Error(`Page fetch failed with status ${response.status}`)
+                        }
+
+                        return await response.text()
+                    }, { baseUrl: this.bot.config.baseURL, nonce: Date.now() })
+                }
             }
+
+            const dashboardJson = this.extractDashboardJson(html)
+
+            return JSON.parse(dashboardJson) as DashboardData
+        } catch (error) {
+            this.bot.logger.error(
+                this.bot.isMobile,
+                'GET-DASHBOARD-DATA',
+                `Failed to get dashboard data | mode=${this.bot.rewardsVersion === 'modern' ? 'modern-getuserinfo' : 'legacy-html'} | error=${this.formatError(error)}`
+            )
+            throw error
         }
     }
 
@@ -111,7 +214,7 @@ export default class BrowserFunc {
             this.bot.logger.error(
                 this.bot.isMobile,
                 'GET-PANEL-FLYOUT-DATA',
-                `Error fetching panel flyout data: ${error instanceof Error ? error.message : String(error)}`
+                `Error fetching panel flyout data: ${this.formatError(error)}`
             )
             throw error
         }
@@ -139,7 +242,7 @@ export default class BrowserFunc {
             this.bot.logger.info(
                 this.bot.isMobile,
                 'GET-APP-DASHBOARD-DATA',
-                `Error fetching dashboard data: ${error instanceof Error ? error.message : String(error)}`
+                `Error fetching dashboard data: ${this.formatError(error)}`
             )
             throw error
         }
@@ -167,7 +270,7 @@ export default class BrowserFunc {
             this.bot.logger.info(
                 this.bot.isMobile,
                 'GET-XBOX-DASHBOARD-DATA',
-                `Error fetching dashboard data: ${error instanceof Error ? error.message : String(error)}`
+                `Error fetching dashboard data: ${this.formatError(error)}`
             )
             throw error
         }
@@ -246,7 +349,7 @@ export default class BrowserFunc {
             this.bot.logger.error(
                 this.bot.isMobile,
                 'GET-BROWSER-EARNABLE-POINTS',
-                `An error occurred: ${error instanceof Error ? error.message : String(error)}`
+                `An error occurred: ${this.formatError(error)}`
             )
             throw error
         }
@@ -336,7 +439,7 @@ export default class BrowserFunc {
             this.bot.logger.error(
                 this.bot.isMobile,
                 'GET-CURRENT-POINTS',
-                `An error occurred: ${error instanceof Error ? error.message : String(error)}`
+                `An error occurred: ${this.formatError(error)}`
             )
             throw error
         }

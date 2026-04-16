@@ -44,6 +44,69 @@ export class GeminiQueryEngine {
                errorMessage.toLowerCase().includes('resource has been exhausted')
     }
 
+    async generateActivityQueries(title: string, description: string, count = 5): Promise<string[]> {
+        const safeCount = Math.max(1, Math.min(count, 20))
+        const normalizedTitle = title.trim()
+        const normalizedDescription = description.trim()
+        const prompt = `Generate exactly ${safeCount} realistic Bing search queries as a JSON array of strings.
+Activity title: "${normalizedTitle}"
+Activity description: "${normalizedDescription}"
+
+Rules:
+- Return ONLY a valid JSON array of strings.
+- Keep queries relevant to the activity title/description context.
+- Mix short and medium natural search phrases.
+- Do not include markdown, code fences, or explanations.`
+
+        let attempt = 0
+        let consecutiveFailures = 0
+        const maxConsecutiveFailures = 3
+
+        while (true) {
+            attempt++
+
+            try {
+                await this.ensureAiReady()
+                this.bot.logger.debug(
+                    this.bot.isMobile,
+                    'GEMINI-QUERY-ENGINE',
+                    `Attempt ${attempt}: Generating activity queries (Key ${this.currentKeyIndex + 1}/${this.apiKeys.length})`
+                )
+
+                const response = await this.ai.models.generateContent({
+                    model: 'gemini-3-flash-preview',
+                    contents: prompt
+                })
+
+                if (!response.text) {
+                    throw new Error('No text response from Gemini API')
+                }
+
+                const parsed = this.parseJsonResponse(response.text)
+                const deduped = [...new Set(parsed.map(x => x.trim()).filter(Boolean))]
+                return deduped.slice(0, safeCount)
+            } catch (error) {
+                const errorMessage = error instanceof Error ? error.message : String(error)
+                consecutiveFailures++
+
+                this.bot.logger.debug(
+                    this.bot.isMobile,
+                    'GEMINI-QUERY-ENGINE',
+                    `Activity query attempt ${attempt} failed (Key ${this.currentKeyIndex + 1}/${this.apiKeys.length}): ${errorMessage}`
+                )
+
+                if (this.isRateLimitError(error) || consecutiveFailures >= maxConsecutiveFailures) {
+                    await this.rotateApiKey()
+                    consecutiveFailures = 0
+                    await this.bot.utils.wait(1000)
+                    continue
+                }
+
+                await this.bot.utils.wait(3000)
+            }
+        }
+    }
+
     async generateSearchQueries(): Promise<string[]> {
         const prompt = `You are an elite data simulation AI specializing in human search behavior and query log generation. Your task is to generate a JSON array containing exactly 120 unique, highly realistic Google search queries that reflect authentic user behavior worldwide in the year 2026.
 

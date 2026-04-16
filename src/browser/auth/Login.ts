@@ -537,6 +537,7 @@ export class Login {
                 'Modern Rewards dashboard detected. Using panel flyout method.'
             )
         } else {
+            this.bot.rewardsVersion = 'legacy'
             this.bot.logger.info(this.bot.isMobile, 'LOGIN', 'Starting rewards session verification')
             await this.getRewardsSession(page)
         }
@@ -718,6 +719,7 @@ export class Login {
                             // Stop retrying token loops and proceed with panel-flyout based flows.
                             return
                         }
+                        this.bot.rewardsVersion = 'legacy'
 
                         const token =
                             $(this.selectors.requestToken).attr('value') ??
@@ -786,11 +788,82 @@ export class Login {
             const claimToken = this.bot.requestToken
             const endpoints = ['https://rewards.bing.com/api/claimallpointsasync']
             let success = false
+            let lastEndpointError = ''
 
             const claimParams = new URLSearchParams({
                 timeZone: '0',
                 __RequestVerificationToken: claimToken
             })
+
+            // First try through in-page fetch so anti-forgery token + cookies stay in the same browser session context.
+            try {
+                const browserResult = await page.evaluate(async ({ token }) => {
+                    const body = new URLSearchParams({
+                        timeZone: '0',
+                        __RequestVerificationToken: token
+                    })
+
+                    const response = await fetch('/api/claimallpointsasync?X-Requested-With=XMLHttpRequest', {
+                        method: 'POST',
+                        headers: {
+                            'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                            'x-requested-with': 'XMLHttpRequest'
+                        },
+                        body
+                    })
+
+                    const text = await response.text()
+                    let data: unknown = null
+                    try {
+                        data = JSON.parse(text)
+                    } catch {
+                        data = text
+                    }
+
+                    return {
+                        ok: response.ok,
+                        status: response.status,
+                        data
+                    }
+                }, { token: claimToken })
+
+                if (browserResult.ok && browserResult.data && typeof browserResult.data === 'object') {
+                    const data = browserResult.data as { balance?: number; activity?: { points?: number } }
+                    if (typeof data.balance === 'number') {
+                        const pointsEarned = data.activity?.points ?? 0
+                        this.bot.userData.currentPoints = data.balance
+                        this.bot.logger.info(
+                            this.bot.isMobile,
+                            'CLAIM-ALL-POINTS',
+                            `✅ Claimed all available points | earned=${pointsEarned} | balance=${data.balance}`
+                        )
+                    } else {
+                        this.bot.logger.info(this.bot.isMobile, 'CLAIM-ALL-POINTS', '✅ Claim all points request succeeded')
+                    }
+                    return
+                }
+
+                const browserBodySnippet =
+                    typeof browserResult.data === 'string'
+                        ? browserResult.data.slice(0, 300)
+                        : browserResult.data && typeof browserResult.data === 'object'
+                          ? JSON.stringify(browserResult.data).slice(0, 300)
+                          : ''
+
+                this.bot.logger.debug(
+                    this.bot.isMobile,
+                    'CLAIM-ALL-POINTS',
+                    `Browser-context claim failed, trying HTTP fallback | status=${browserResult.status} ${
+                        browserBodySnippet ? `| body=${browserBodySnippet}` : ''
+                    }`
+                )
+            } catch (browserError) {
+                this.bot.logger.debug(
+                    this.bot.isMobile,
+                    'CLAIM-ALL-POINTS',
+                    `Browser-context claim error, trying HTTP fallback | error=${browserError instanceof Error ? browserError.message : String(browserError)}`
+                )
+            }
 
             for (const endpoint of endpoints) {
                 try {
@@ -852,16 +925,30 @@ export class Login {
                     success = true
                     break
 
-                } catch (error: any) {
+                } catch (error) {
+                    const message = error instanceof Error ? error.message : String(error)
+                    const maybeResponse = error as { response?: { status?: number; data?: unknown } }
+                    const status = maybeResponse.response?.status
+                    const responseData = maybeResponse.response?.data
+                    const bodySnippet =
+                        typeof responseData === 'string'
+                            ? responseData.slice(0, 300)
+                            : responseData && typeof responseData === 'object'
+                              ? JSON.stringify(responseData).slice(0, 300)
+                              : ''
+
+                    lastEndpointError = `endpoint=${endpoint} | status=${status ?? 'n/a'} | message=${message}${
+                        bodySnippet ? ` | body=${bodySnippet}` : ''
+                    }`
                     continue
                 }
             }
 
             if (!success) {
-                throw new Error('Failed to claim all points')
+                throw new Error(`Failed to claim all points${lastEndpointError ? ` | ${lastEndpointError}` : ''}`)
             }
 
-        } catch (error: any) {
+        } catch (error) {
             this.bot.logger.warn(
                 this.bot.isMobile,
                 'CLAIM-ALL-POINTS',

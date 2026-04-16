@@ -20,9 +20,12 @@ class AxiosClient {
     private directDesktopSession: Session
     private directMobileSession: Session
     private account: AccountProxy
+    private debugEnabled: boolean
 
-    constructor(account: AccountProxy) {
+    constructor(account: AccountProxy, _options?: { debug?: boolean }) {
         this.account = account
+        // Keep httpcloak logs silent to avoid noisy console output.
+        this.debugEnabled = false
 
         this.directDesktopSession = new Session({
             ...BASE_SESSION_OPTIONS,
@@ -61,16 +64,13 @@ class AxiosClient {
         }
 
         const protocol = urlObj.protocol.toLowerCase()
-        let proxyUrl: string
-
         if (username && password) {
             urlObj.username = encodeURIComponent(username)
             urlObj.password = encodeURIComponent(password)
             urlObj.port = port.toString()
             return urlObj.toString()
-        } else {
-            proxyUrl = `${protocol}//${urlObj.hostname}:${port}`
         }
+        const proxyUrl = `${protocol}//${urlObj.hostname}:${port}`
 
         if (!['http:', 'https:', 'socks4:', 'socks5:'].includes(protocol)) {
             throw new Error(`Unsupported proxy protocol: ${protocol}. Only HTTP(S) and SOCKS4/5 are supported!`)
@@ -87,12 +87,11 @@ class AxiosClient {
                 ? (maybeHeaders.toJSON() as Record<string, unknown>)
                 : (headers as Record<string, unknown>)
 
-        const out: Record<string, string> = {}
-        for (const [key, value] of Object.entries(source ?? {})) {
-            if (value === undefined || value === null) continue
-            out[key] = String(value)
-        }
-        return out
+        return Object.fromEntries(
+            Object.entries(source ?? {})
+                .filter(([, value]) => value !== undefined && value !== null)
+                .map(([key, value]) => [key, String(value)])
+        )
     }
 
     private normalizeParams(params: AxiosRequestConfig['params']): Record<string, string | number | boolean> | undefined {
@@ -137,6 +136,80 @@ class AxiosClient {
         return response.text
     }
 
+    private maskHeaderValue(key: string, value: string): string {
+        const lowerKey = key.toLowerCase()
+        if (
+            lowerKey.includes('cookie') ||
+            lowerKey.includes('authorization') ||
+            lowerKey.includes('token') ||
+            lowerKey.includes('api-key') ||
+            lowerKey.includes('apikey') ||
+            lowerKey.includes('x-ms-client-request-id')
+        ) {
+            if (!value) return value
+            return `${value.slice(0, 12)}...`
+        }
+        return value
+    }
+
+    private maskSensitiveInBody(body: string): string {
+        return body
+            .replace(/(__RequestVerificationToken=)[^&]+/gi, '$1***')
+            .replace(/(Authorization["']?\s*:\s*["'])[^"']+/gi, '$1***')
+            .replace(/(Bearer\s+)[A-Za-z0-9\-._~+/=]+/gi, '$1***')
+    }
+
+    private stringifyPayloadForLog(body: unknown, json: unknown): string {
+        if (typeof body === 'string') {
+            return this.maskSensitiveInBody(body).slice(0, 800)
+        }
+        if (Buffer.isBuffer(body)) {
+            return `[buffer length=${body.length}]`
+        }
+        if (json && typeof json === 'object') {
+            try {
+                return this.maskSensitiveInBody(JSON.stringify(json)).slice(0, 800)
+            } catch {
+                return '[json payload]'
+            }
+        }
+        if (body === undefined && json === undefined) {
+            return '[empty]'
+        }
+        return String(body ?? json).slice(0, 800)
+    }
+
+    private logRequest(
+        method: string,
+        url: string,
+        headers: Record<string, string> | undefined,
+        params: Record<string, string | number | boolean> | undefined,
+        body: unknown,
+        json: unknown
+    ): void {
+        if (!this.debugEnabled) return
+        const safeHeaders = Object.fromEntries(
+            Object.entries(headers ?? {}).map(([key, value]) => [key, this.maskHeaderValue(key, value)])
+        )
+        const payload = this.stringifyPayloadForLog(body, json)
+        console.log(
+            `[HTTPCLOAK][REQ] ${method} ${url} | headers=${JSON.stringify(safeHeaders)} | params=${JSON.stringify(params ?? {})} | payload=${payload}`
+        )
+    }
+
+    private logResponse(method: string, url: string, statusCode: number, responseText: string): void {
+        if (!this.debugEnabled) return
+        const snippet = this.maskSensitiveInBody(responseText).slice(0, 800)
+        console.log(`[HTTPCLOAK][RES] ${method} ${url} | status=${statusCode} | body=${snippet}`)
+    }
+
+    private resolveSession(bypassProxy: boolean, mobileRequest: boolean): Session {
+        if (bypassProxy) {
+            return mobileRequest ? this.directMobileSession : this.directDesktopSession
+        }
+        return mobileRequest ? this.mobileSession : this.desktopSession
+    }
+
     private isMobileRequest(url: string, headers?: Record<string, string>): boolean {
         const lowerUrl = url.toLowerCase()
         const userAgent = (headers?.['user-agent'] ?? headers?.['User-Agent'] ?? '').toLowerCase()
@@ -159,13 +232,7 @@ class AxiosClient {
         const method = (config.method ?? 'GET').toUpperCase()
         const headers = this.normalizeHeaders(config.headers)
         const mobileRequest = this.isMobileRequest(config.url, headers)
-        const session = bypassProxy
-            ? mobileRequest
-                ? this.directMobileSession
-                : this.directDesktopSession
-            : mobileRequest
-              ? this.mobileSession
-              : this.desktopSession
+        const session = this.resolveSession(bypassProxy, mobileRequest)
         const params = this.normalizeParams(config.params)
         const timeoutSeconds = config.timeout ? Math.max(1, Math.ceil(config.timeout / 1000)) : undefined
         const auth: [string, string] | undefined =
@@ -173,17 +240,26 @@ class AxiosClient {
                 ? [config.auth.username, config.auth.password ?? '']
                 : undefined
 
-        let body: string | Buffer | Record<string, any> | undefined
-        let json: Record<string, any> | undefined
-        if (config.data !== undefined) {
-            if (Buffer.isBuffer(config.data) || typeof config.data === 'string') {
-                body = config.data
-            } else if (typeof config.data === 'object' && config.data !== null) {
-                json = config.data as Record<string, any>
-            } else {
-                body = String(config.data)
-            }
-        }
+        const body =
+            config.data === undefined
+                ? undefined
+                : Buffer.isBuffer(config.data) || typeof config.data === 'string'
+                  ? config.data
+                  : config.data instanceof URLSearchParams
+                    ? config.data.toString()
+                  : typeof config.data === 'object' && config.data !== null
+                    ? undefined
+                    : String(config.data)
+        const json =
+            config.data !== undefined &&
+            typeof config.data === 'object' &&
+            !Buffer.isBuffer(config.data) &&
+            !(config.data instanceof URLSearchParams) &&
+            config.data !== null
+                ? (config.data as Record<string, any>)
+                : undefined
+
+        this.logRequest(method, config.url, headers, params, body, json)
 
         const response = await session.request(method, config.url, {
             headers,
@@ -193,6 +269,7 @@ class AxiosClient {
             body,
             json
         })
+        this.logResponse(method, config.url, response.statusCode, response.text)
 
         const responseConfig: InternalAxiosRequestConfig = {
             ...(config as InternalAxiosRequestConfig),

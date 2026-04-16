@@ -4,6 +4,7 @@ import path from 'path'
 
 import { Workers } from '../../Workers'
 import { QueryCore } from '../../QueryEngine'
+import { GeminiQueryEngine } from '../../GeminiQueryEngine'
 
 import type { BasePromotion } from '../../../interface/DashboardData'
 
@@ -28,6 +29,14 @@ export class SearchOnBing extends Workers {
         return attributes as Record<string, unknown>
     }
 
+    private getAttrValue(attributes: Record<string, unknown>, key: string): unknown {
+        const direct = attributes[key]
+        if (direct !== undefined) return direct
+        const lowerKey = key.toLowerCase()
+        const found = Object.entries(attributes).find(([k]) => k.toLowerCase() === lowerKey)
+        return found?.[1]
+    }
+
     constructor(bot: any) {
         super(bot)
     }
@@ -46,11 +55,9 @@ export class SearchOnBing extends Workers {
 
         try {
             this.cookieHeader = this.bot.browser.func.buildCookieHeader(
-                this.bot.isMobile ? this.bot.cookies.mobile : this.bot.cookies.desktop, [
-                'bing.com',
-                'live.com',
-                'microsoftonline.com'
-            ])
+                this.bot.isMobile ? this.bot.cookies.mobile : this.bot.cookies.desktop,
+                ['bing.com', 'live.com', 'microsoftonline.com']
+            )
 
             const fingerprintHeaders = { ...this.bot.fingerprint.headers }
             delete fingerprintHeaders['Cookie']
@@ -63,13 +70,30 @@ export class SearchOnBing extends Workers {
                 `Prepared headers for SearchOnBing | offerId=${offerId} | cookieLength=${this.cookieHeader.length} | fingerprintHeaderKeys=${Object.keys(this.fingerprintHeader).length}`
             )
 
-            const pointProgress = Number(promotion.pointProgress ?? 0)
-            const pointProgressMax = Number(promotion.pointProgressMax ?? 0)
-            if (pointProgressMax > 0 && pointProgress >= pointProgressMax) {
+            const attributes = this.toAttributeMap(promotion.attributes)
+            const attrProgress = Number(this.getAttrValue(attributes, 'progress') ?? 0)
+            const attrMax = Number(this.getAttrValue(attributes, 'max') ?? 0)
+            const attrCompleteRaw = this.getAttrValue(attributes, 'complete')
+            const attrComplete =
+                typeof attrCompleteRaw === 'string' ? attrCompleteRaw.toLowerCase() === 'true' : Boolean(attrCompleteRaw)
+
+            const initialProgress = Number(promotion.pointProgress ?? attrProgress ?? 0)
+            const initialProgressMax = Number(promotion.pointProgressMax ?? attrMax ?? 0)
+            const initiallyComplete =
+                Boolean(promotion.complete) ||
+                attrComplete ||
+                (initialProgressMax > 0 && initialProgress >= initialProgressMax)
+
+            const preSearchCompletion = initiallyComplete
+                ? { complete: true, pointProgress: initialProgress, pointProgressMax: initialProgressMax }
+                : await this.checkActivityCompletionFromDashboard(offerId, initialProgressMax)
+
+            if (preSearchCompletion.complete) {
+                this.success = true
                 this.bot.logger.info(
                     this.bot.isMobile,
                     'SEARCH-ON-BING',
-                    `Search activity already complete by progress | offerId=${offerId} | progress=${pointProgress}/${pointProgressMax}`
+                    `Extra Search Activity Completed | offerId=${offerId} | progress=${preSearchCompletion.pointProgress}/${preSearchCompletion.pointProgressMax}`
                 )
                 return
             }
@@ -111,6 +135,16 @@ export class SearchOnBing extends Workers {
     private async searchBing(page: Page, queries: string[], promotion: BasePromotion) {
         queries = [...new Set(queries)]
         let lastBalance = this.oldBalance
+        let localProgress = Number(promotion.pointProgress ?? 0)
+        const localProgressMax = Number(promotion.pointProgressMax ?? 0)
+        const markComplete = (completion: { pointProgress: number; pointProgressMax: number }) => {
+            this.success = true
+            this.bot.logger.info(
+                this.bot.isMobile,
+                'SEARCH-ON-BING-SEARCH',
+                `Extra Search Activity Completed | offerId=${promotion.offerId} | progress=${completion.pointProgress}/${completion.pointProgressMax}`
+            )
+        }
 
         this.bot.logger.debug(
             this.bot.isMobile,
@@ -123,7 +157,8 @@ export class SearchOnBing extends Workers {
             try {
                 this.bot.logger.debug(this.bot.isMobile, 'SEARCH-ON-BING-SEARCH', `Processing query | query="${query}"`)
 
-                await this.bot.mainMobilePage.goto(this.bingHome)
+                // Use the page passed to this method (mobile or desktop execution context).
+                await page.goto(this.bingHome)
 
                 // Wait until page loaded
                 await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {})
@@ -159,30 +194,39 @@ export class SearchOnBing extends Workers {
                     this.gainedAnyPoints = true
                     this.bot.userData.currentPoints = newBalance
                     this.bot.userData.gainedPoints = (this.bot.userData.gainedPoints ?? 0) + this.gainedPoints
+                    localProgress += this.gainedPoints
 
                     const completion = await this.checkActivityCompletionFromDashboard(
                         promotion.offerId,
                         Number(promotion.pointProgressMax ?? 0)
                     )
+                    const displayProgress = Math.max(completion.pointProgress, localProgress)
+                    const displayProgressMax = completion.pointProgressMax > 0 ? completion.pointProgressMax : localProgressMax
 
                     this.bot.logger.info(
                         this.bot.isMobile,
                         'SEARCH-ON-BING-SEARCH',
-                        `SearchOnBing query completed | query="${query}" | gainedPoints=${this.gainedPoints} | previousBalance=${newBalance - this.gainedPoints} | newBalance=${newBalance} | progress=${completion.pointProgress}/${completion.pointProgressMax}`,
+                        `SearchOnBing query completed | query="${query}" | gainedPoints=${this.gainedPoints} | previousBalance=${newBalance - this.gainedPoints} | newBalance=${newBalance} | progress=${displayProgress}/${displayProgressMax}`,
                         'green'
                     )
-
-                    if (completion.complete) {
-                        this.success = true
-                        this.bot.logger.info(
-                            this.bot.isMobile,
-                            'SEARCH-ON-BING-SEARCH',
-                            `Extra Search Activity Completed | offerId=${promotion.offerId} | progress=${completion.pointProgress}/${completion.pointProgressMax}`
-                        )
+                    if (
+                        completion.complete ||
+                        (displayProgressMax > 0 && displayProgress >= displayProgressMax)
+                    ) {
+                        markComplete({ pointProgress: displayProgress, pointProgressMax: displayProgressMax })
                         return
                     }
 
                 } else {
+                    const completion = await this.checkActivityCompletionFromDashboard(
+                        promotion.offerId,
+                        Number(promotion.pointProgressMax ?? 0)
+                    )
+                    if (completion.complete) {
+                        markComplete(completion)
+                        return
+                    }
+
                     this.bot.logger.warn(
                         this.bot.isMobile,
                         'SEARCH-ON-BING-SEARCH',
@@ -212,8 +256,49 @@ export class SearchOnBing extends Workers {
         fallbackPointProgressMax: number
     ): Promise<{ complete: boolean; pointProgress: number; pointProgressMax: number }> {
         try {
+            const toCompletion = (promotion: {
+                complete?: unknown
+                pointProgress?: unknown
+                pointProgressMax?: unknown
+                attributes?: unknown
+                offerId?: unknown
+            }) => {
+                const attributes = this.toAttributeMap(promotion.attributes)
+                const attrProgress = Number(this.getAttrValue(attributes, 'progress') ?? 0)
+                const attrMax = Number(this.getAttrValue(attributes, 'max') ?? 0)
+                const pointProgress = Number(promotion.pointProgress ?? attrProgress ?? 0)
+                const pointProgressMax = Number(promotion.pointProgressMax ?? attrMax ?? fallbackPointProgressMax ?? 0)
+                const attrCompleteRaw = this.getAttrValue(attributes, 'complete')
+                const attrComplete =
+                    typeof attrCompleteRaw === 'string' ? attrCompleteRaw.toLowerCase() === 'true' : Boolean(attrCompleteRaw)
+                const complete =
+                    Boolean(promotion.complete) || attrComplete || (pointProgressMax > 0 && pointProgress >= pointProgressMax)
+
+                return { complete, pointProgress, pointProgressMax, matchedOfferId: String(promotion.offerId ?? '') }
+            }
+
+            const findMatchingPromotion = (
+                promotions: Array<{ offerId?: unknown; attributes?: unknown; destinationUrl?: unknown }>,
+                offerKey: string
+            ) => {
+                const matched = promotions.find(x => {
+                    const topLevelOfferId = String(x.offerId ?? '').toLowerCase()
+                    const attrs = this.toAttributeMap(x.attributes)
+                    const attrOfferId = String(
+                        this.getAttrValue(attrs, 'offerid') ?? this.getAttrValue(attrs, 'offerId') ?? ''
+                    ).toLowerCase()
+                    return topLevelOfferId === offerKey || attrOfferId === offerKey
+                })
+                return matched ?? null
+            }
+
             const data = await this.bot.browser.func.getDashboardData()
             const offerKey = offerId.toLowerCase()
+            this.bot.logger.debug(
+                this.bot.isMobile,
+                'SEARCH-ON-BING-SEARCH',
+                `Dashboard completion check fetched data | offerId=${offerId}`
+            )
 
             const dailySetPromotions = Object.values(data.dailySetPromotions ?? {}).flat()
             const punchCardPromotions = (data.punchCards ?? []).flatMap(x => [
@@ -229,26 +314,27 @@ export class SearchOnBing extends Workers {
                 ...punchCardPromotions
             ]
 
-            const matched = allPromotions.find(x => {
-                const topLevelOfferId = String(x.offerId ?? '').toLowerCase()
-                const attrOfferId = String(this.toAttributeMap(x.attributes).offerid ?? '').toLowerCase()
-                return topLevelOfferId === offerKey || attrOfferId === offerKey
-            })
+            let matched = findMatchingPromotion(allPromotions, offerKey)
             if (!matched) {
+                const sampleOfferIds = allPromotions
+                    .slice(0, 8)
+                    .map(x => String(x.offerId ?? this.getAttrValue(this.toAttributeMap(x.attributes), 'offerid') ?? ''))
+                    .filter(Boolean)
+                    .join(', ')
+                this.bot.logger.debug(
+                    this.bot.isMobile,
+                    'SEARCH-ON-BING-SEARCH',
+                    `Dashboard completion check no match | offerId=${offerId} | sampleOffers=[${sampleOfferIds}]`
+                )
                 return { complete: false, pointProgress: 0, pointProgressMax: fallbackPointProgressMax }
             }
 
-            const attributes = this.toAttributeMap(matched.attributes)
-            const attrProgress = Number(attributes.progress ?? 0)
-            const attrMax = Number(attributes.max ?? 0)
-            const pointProgress = Number(matched.pointProgress ?? attrProgress ?? 0)
-            const pointProgressMax = Number(matched.pointProgressMax ?? attrMax ?? fallbackPointProgressMax ?? 0)
-            const attrCompleteRaw = attributes.complete
-            const attrComplete =
-                typeof attrCompleteRaw === 'string'
-                    ? attrCompleteRaw.toLowerCase() === 'true'
-                    : Boolean(attrCompleteRaw)
-            const complete = Boolean(matched.complete) || attrComplete || (pointProgressMax > 0 && pointProgress >= pointProgressMax)
+            const { complete, pointProgress, pointProgressMax, matchedOfferId } = toCompletion(matched)
+            this.bot.logger.debug(
+                this.bot.isMobile,
+                'SEARCH-ON-BING-SEARCH',
+                `Dashboard completion check matched | offerId=${offerId} | matchedOfferId=${matchedOfferId} | progress=${pointProgress}/${pointProgressMax} | complete=${complete}`
+            )
 
             return { complete, pointProgress, pointProgressMax }
         } catch (error) {
@@ -277,37 +363,52 @@ export class SearchOnBing extends Workers {
         ) as ('gemini' | 'google' | 'wikipedia' | 'reddit' | 'local')[]
 
         try {
-            const geminiOnly =
-                configuredSources.length === 1 && configuredSources[0] === 'gemini'
+            const generateMainQueries = () =>
+                queryCore.queryManager({ shuffle: true, related: false, langCode, geoLocale: locale, sourceOrder })
+            const offerIdLower = String(promotion.offerId ?? '').toLowerCase()
 
-            if (geminiOnly) {
-                this.bot.logger.info(
+            if (offerIdLower === 'ww_rewards_banner_search_april_202604') {
+                const mainQueries = await generateMainQueries()
+                if (mainQueries.length) {
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'SEARCH-ON-BING-QUERY',
+                        `Special activity detected, using main QueryCore | offerId=${promotion.offerId} | count=${mainQueries.length}`
+                    )
+                    return mainQueries
+                }
+                this.bot.logger.warn(
                     this.bot.isMobile,
                     'SEARCH-ON-BING-QUERY',
-                    `Gemini-only mode enabled, generating queries via QueryCore | title="${promotion.title}"`
+                    `Special activity detected, but QueryCore returned 0 queries | offerId=${promotion.offerId}`
                 )
+            }
 
+            const geminiEnabled = sourceOrder.includes('gemini')
+            if (geminiEnabled) {
                 try {
-                    const mainQueries = await queryCore.queryManager({
-                        shuffle: true,
-                        related: false,
-                        langCode,
-                        geoLocale: locale,
-                        sourceOrder
-                    })
-                    if (mainQueries.length > 0) {
+                    const description = String(promotion.description ?? '')
+                    const seedFromActivity = `${promotion.title} ${description}`
+                        .replace(/search to complete/gi, '')
+                        .replace(/search on bing/gi, '')
+                        .replace(/\s+/g, ' ')
+                        .trim()
+                    const seedFallback = String(promotion.title ?? '').trim() || 'bing rewards activity'
+                    const geminiEngine = new GeminiQueryEngine(this.bot)
+                    const activityQueries = await geminiEngine.generateActivityQueries(seedFallback, seedFromActivity, 5)
+                    if (activityQueries.length > 0) {
                         this.bot.logger.info(
                             this.bot.isMobile,
                             'SEARCH-ON-BING-QUERY',
-                            `Using QueryCore-generated queries (gemini-only) | count=${mainQueries.length} | title="${promotion.title}"`
+                            `Using activity-seeded Gemini queries | count=${activityQueries.length} | title="${promotion.title}"`
                         )
-                        return mainQueries
+                        return activityQueries
                     }
                 } catch (queryError) {
                     this.bot.logger.warn(
                         this.bot.isMobile,
                         'SEARCH-ON-BING-QUERY',
-                        `Gemini-only QueryCore generation failed, falling back to configured sources | title="${promotion.title}" | error=${queryError instanceof Error ? queryError.message : String(queryError)}`
+                        `Activity-seeded Gemini query generation failed, continuing | title="${promotion.title}" | error=${queryError instanceof Error ? queryError.message : String(queryError)}`
                     )
                 }
             }
@@ -365,7 +466,7 @@ export class SearchOnBing extends Workers {
                     `No matching title in queries config | source=${this.bot.config.searchOnBingLocalQueries ? 'local' : 'remote'} | title="${promotion.title}"`
                 )
 
-                const promotionDescription = promotion.description.toLowerCase().trim()
+                const promotionDescription = String(promotion.description ?? '').toLowerCase().trim()
                 const queryDescription = promotionDescription.replace('search on bing', '').trim()
 
                 this.bot.logger.debug(

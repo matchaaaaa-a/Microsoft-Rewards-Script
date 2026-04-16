@@ -144,6 +144,10 @@ export class SearchManager {
 
         let desktopSession: BrowserSession | null = null
         let mobileContextClosed = false
+        let resolveMobileSearchDone!: () => void
+        const mobileSearchDone = new Promise<void>(resolve => {
+            resolveMobileSearchDone = () => resolve()
+        })
 
         try {
             const promises: Promise<number>[] = []
@@ -157,10 +161,18 @@ export class SearchManager {
                 )
                 searchTypes.push('Mobile')
                 promises.push(
-                    this.doMobileSearch(data, missingSearchPoints, mobileSession, accountEmail, executionContext).then(
+                    this.doMobileSearch(
+                        data,
+                        missingSearchPoints,
+                        mobileSession,
+                        accountEmail,
+                        executionContext,
+                        !shouldDoDesktop
+                    ).then(
                         points => {
                             mobileContextClosed = true
                             this.bot.logger.info('main', 'SEARCH-MANAGER', `Mobile done | earned=${points}`)
+                            resolveMobileSearchDone()
                             return points
                         }
                     )
@@ -171,6 +183,7 @@ export class SearchManager {
                 await this.bot.browser.func.closeBrowser(mobileSession.context, accountEmail)
                 mobileContextClosed = true
                 this.bot.logger.info('main', 'SEARCH-MANAGER', 'Mobile session closed (no mobile search)')
+                resolveMobileSearchDone()
             }
 
             if (shouldDoDesktop) {
@@ -202,7 +215,8 @@ export class SearchManager {
                         missingSearchPoints,
                         desktopSession,
                         accountEmail,
-                        executionContext
+                        executionContext,
+                        mobileSearchDone
                     ).then(points => {
                         this.bot.logger.info('main', 'SEARCH-MANAGER', `Desktop done | earned=${points}`)
                         return points
@@ -304,7 +318,8 @@ export class SearchManager {
                 missingSearchPoints,
                 mobileSession,
                 accountEmail,
-                executionContext
+                executionContext,
+                !shouldDoDesktop
             )
             this.bot.logger.info('main', 'SEARCH-MANAGER', `Step 1: mobile done | earned=${mobilePoints}`)
         } else {
@@ -396,7 +411,8 @@ export class SearchManager {
         missingSearchPoints: MissingSearchPoints,
         mobileSession: BrowserSession,
         accountEmail: string,
-        executionContext: any
+        executionContext: any,
+        runDeferredExtraAfterMobile = false
     ): Promise<number> {
         this.bot.logger.debug(
             'main',
@@ -424,6 +440,10 @@ export class SearchManager {
                 this.bot.logger.debug('main', 'SEARCH-MOBILE-SEARCH', 'activities.doSearch (mobile)')
 
                 const pointsEarned = await this.bot.activities.doSearch(data, this.bot.mainMobilePage, true)
+
+                if (runDeferredExtraAfterMobile) {
+                    await this.bot['workers'].doDeferredExtraSearch(this.bot.mainMobilePage)
+                }
 
                 this.bot.logger.info(
                     'main',
@@ -472,7 +492,8 @@ export class SearchManager {
         missingSearchPoints: MissingSearchPoints,
         desktopSession: BrowserSession,
         accountEmail: string,
-        executionContext: any
+        executionContext: any,
+        waitForMobileSearchDone?: Promise<void>
     ): Promise<number> {
         this.bot.logger.debug(
             'main',
@@ -488,6 +509,11 @@ export class SearchManager {
                     `Search start | target=${missingSearchPoints.desktopPoints}`
                 )
                 const pointsEarned = await this.bot.activities.doSearch(data, this.bot.mainDesktopPage, false)
+
+                if (waitForMobileSearchDone) {
+                    await waitForMobileSearchDone
+                }
+                await this.bot['workers'].doDeferredExtraSearch(this.bot.mainDesktopPage)
 
                 this.bot.logger.info(
                     'main',
@@ -567,6 +593,8 @@ export class SearchManager {
                 )
 
                 const pointsEarned = await this.bot.activities.doSearch(data, this.bot.mainDesktopPage, false)
+
+                await this.bot['workers'].doDeferredExtraSearch(this.bot.mainDesktopPage)
 
                 this.bot.logger.info(
                     'main',

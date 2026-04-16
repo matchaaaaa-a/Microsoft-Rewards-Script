@@ -29,13 +29,13 @@ export class UserAgentManager {
             platform: isMobile ? 'Android' : 'Windows',
             fullVersionList: [
                 { brand: 'Not/A)Brand', version: `${UserAgentManager.NOT_A_BRAND_VERSION}.0.0.0` },
-                { brand: 'Microsoft Edge', version: app['edge_version'] },
-                { brand: 'Chromium', version: app['chrome_version'] }
+                { brand: 'Microsoft Edge', version: app.edge_version },
+                { brand: 'Chromium', version: app.chrome_version }
             ],
             brands: [
                 { brand: 'Not/A)Brand', version: UserAgentManager.NOT_A_BRAND_VERSION },
-                { brand: 'Microsoft Edge', version: app['edge_major_version'] },
-                { brand: 'Chromium', version: app['chrome_major_version'] }
+                { brand: 'Microsoft Edge', version: app.edge_major_version },
+                { brand: 'Chromium', version: app.chrome_major_version }
             ],
             platformVersion,
             architecture: isMobile ? '' : 'x86',
@@ -57,37 +57,46 @@ export class UserAgentManager {
         }
     }
 
+    private parseResponseJson<T>(text: string, response: { json: <R = unknown>() => R }): T | null {
+        return (
+            this.tryParseJson<T>(text) ??
+            (() => {
+                try {
+                    return response.json<T>()
+                } catch {
+                    return null
+                }
+            })()
+        )
+    }
+
+    private async getJsonWithDebug<T>(
+        url: string,
+        logTag: 'USERAGENT-CHROME-VERSION' | 'USERAGENT-EDGE-VERSION',
+        isMobile: boolean,
+        headers: Record<string, string>
+    ): Promise<T | null> {
+        const response = await this.httpSession.get(url, { headers })
+        this.bot.logger.debug(
+            isMobile,
+            logTag,
+            `Version endpoint response | status=${response.statusCode} | protocol=${response.protocol} | length=${response.text.length}`
+        )
+        return this.parseResponseJson<T>(response.text, response)
+    }
+
     async getChromeVersion(isMobile: boolean): Promise<string> {
         try {
-            const requestUrl = `https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions.json?t=${Date.now()}`
-            const request = {
-                url: requestUrl,
-                method: 'GET',
-                headers: {
+            const data = await this.getJsonWithDebug<ChromeVersion>(
+                `https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions.json?t=${Date.now()}`,
+                'USERAGENT-CHROME-VERSION',
+                isMobile,
+                {
                     'Content-Type': 'application/json',
                     'Cache-Control': 'no-cache, no-store, max-age=0',
                     Pragma: 'no-cache'
                 }
-            }
-
-            const response = await this.httpSession.get(request.url, {
-                headers: request.headers
-            })
-            this.bot.logger.debug(
-                isMobile,
-                'USERAGENT-CHROME-VERSION',
-                `Version endpoint response | status=${response.statusCode} | protocol=${response.protocol} | length=${response.text.length}`
             )
-            const data =
-                this.tryParseJson<ChromeVersion>(response.text) ??
-                (() => {
-                    try {
-                        return response.json<ChromeVersion>()
-                    } catch {
-                        return null
-                    }
-                })()
-
             const stableVersion = data?.channels?.Stable?.version
             if (!stableVersion) {
                 throw new Error('Invalid Chrome versions payload')
@@ -105,32 +114,12 @@ export class UserAgentManager {
 
     async getEdgeVersions(isMobile: boolean) {
         try {
-            const request = {
-                url: 'https://edgeupdates.microsoft.com/api/products',
-                method: 'GET',
-                headers: {
-                    'Content-Type': 'application/json'
-                }
-            }
-
-            const response = await this.httpSession.get(request.url, {
-                headers: request.headers
-            })
-            this.bot.logger.debug(
-                isMobile,
+            const data = await this.getJsonWithDebug<EdgeVersion[]>(
+                'https://edgeupdates.microsoft.com/api/products',
                 'USERAGENT-EDGE-VERSION',
-                `Version endpoint response | status=${response.statusCode} | protocol=${response.protocol} | length=${response.text.length}`
+                isMobile,
+                { 'Content-Type': 'application/json' }
             )
-            const data =
-                this.tryParseJson<EdgeVersion[]>(response.text) ??
-                (() => {
-                    try {
-                        return response.json<EdgeVersion[]>()
-                    } catch {
-                        return null
-                    }
-                })()
-
             if (!Array.isArray(data) || data.length === 0) {
                 throw new Error('Invalid Edge versions payload')
             }
@@ -167,21 +156,25 @@ export class UserAgentManager {
 
     async getAppComponents(isMobile: boolean) {
         const versions = await this.getEdgeVersions(isMobile)
-        const edgeVersion = isMobile ? versions.android : (versions.windows as string)
+        const edgeVersion = isMobile ? versions.android : versions.windows
         const edgeMajorVersion = edgeVersion?.split('.')[0]
 
         const chromeVersion = await this.getChromeVersion(isMobile)
         const chromeMajorVersion = chromeVersion?.split('.')[0]
         const chromeReducedVersion = `${chromeMajorVersion}.0.0.0`
 
+        if (!edgeVersion || !edgeMajorVersion || !chromeVersion || !chromeMajorVersion) {
+            throw new Error('Invalid app component versions')
+        }
+
         return {
             not_a_brand_version: `${UserAgentManager.NOT_A_BRAND_VERSION}.0.0.0`,
             not_a_brand_major_version: UserAgentManager.NOT_A_BRAND_VERSION,
-            edge_version: edgeVersion as string,
-            edge_major_version: edgeMajorVersion as string,
-            chrome_version: chromeVersion as string,
-            chrome_major_version: chromeMajorVersion as string,
-            chrome_reduced_version: chromeReducedVersion as string
+            edge_version: edgeVersion,
+            edge_major_version: edgeMajorVersion,
+            chrome_version: chromeVersion,
+            chrome_major_version: chromeMajorVersion,
+            chrome_reduced_version: chromeReducedVersion
         }
     }
 

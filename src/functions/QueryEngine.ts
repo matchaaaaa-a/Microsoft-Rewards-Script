@@ -9,6 +9,17 @@ import { GeminiQueryEngine } from './GeminiQueryEngine'
 export class QueryCore {
     constructor(private bot: MicrosoftRewardsBot) {}
 
+    private formatError(error: unknown): string {
+        return error instanceof Error ? `${error.name}: ${error.message}\n${error.stack ?? ''}` : String(error)
+    }
+
+    private logNoQueries(scope: string, detail?: string): void {
+        this.bot.logger.warn(this.bot.isMobile, scope, 'No queries')
+        if (detail) {
+            this.bot.logger.debug(this.bot.isMobile, scope, detail)
+        }
+    }
+
     async queryManager(
         options: {
             shuffle?: boolean
@@ -94,8 +105,7 @@ export class QueryCore {
             const baseTopics = this.normalizeAndDedupe(topicLists.flat())
 
             if (!baseTopics.length) {
-                this.bot.logger.warn(this.bot.isMobile, 'QUERY-MANAGER', 'No queries')
-                this.bot.logger.debug(this.bot.isMobile, 'QUERY-MANAGER', 'No base topics found (all sources empty)')
+                this.logNoQueries('QUERY-MANAGER', 'No base topics found (all sources empty)')
                 return []
             }
 
@@ -132,8 +142,7 @@ export class QueryCore {
             )
 
             if (!finalQueries.length) {
-                this.bot.logger.warn(this.bot.isMobile, 'QUERY-MANAGER', 'No queries')
-                this.bot.logger.debug(this.bot.isMobile, 'QUERY-MANAGER', 'finalQueries deduped to 0')
+                this.logNoQueries('QUERY-MANAGER', 'finalQueries deduped to 0')
                 return []
             }
 
@@ -141,12 +150,7 @@ export class QueryCore {
 
             return finalQueries
         } catch (error) {
-            this.bot.logger.warn(this.bot.isMobile, 'QUERY-MANAGER', 'No queries')
-            this.bot.logger.debug(
-                this.bot.isMobile,
-                'QUERY-MANAGER',
-                `error: ${error instanceof Error ? `${error.name}: ${error.message}\n${error.stack ?? ''}` : String(error)}`
-            )
+            this.logNoQueries('QUERY-MANAGER', `error: ${this.formatError(error)}`)
             return []
         }
     }
@@ -233,8 +237,7 @@ export class QueryCore {
             const response = await this.bot.axios.request(request, this.bot.config.proxy.queryEngine)
             const trendsData = this.extractJsonFromResponse(response.data)
             if (!trendsData) {
-                this.bot.logger.warn(this.bot.isMobile, 'SEARCH-GOOGLE-TRENDS', 'No queries')
-                this.bot.logger.debug(this.bot.isMobile, 'SEARCH-GOOGLE-TRENDS', 'No trendsData parsed from response')
+                this.logNoQueries('SEARCH-GOOGLE-TRENDS', 'No trendsData parsed from response')
                 return []
             }
 
@@ -251,14 +254,7 @@ export class QueryCore {
                 })
             }
         } catch (error) {
-            this.bot.logger.warn(this.bot.isMobile, 'SEARCH-GOOGLE-TRENDS', 'No queries')
-            this.bot.logger.debug(
-                this.bot.isMobile,
-                'SEARCH-GOOGLE-TRENDS',
-                `request failed: ${
-                    error instanceof Error ? `${error.name}: ${error.message}\n${error.stack ?? ''}` : String(error)
-                }`
-            )
+            this.logNoQueries('SEARCH-GOOGLE-TRENDS', `request failed: ${this.formatError(error)}`)
             return []
         }
 
@@ -294,23 +290,14 @@ export class QueryCore {
                 response.data.suggestionGroups?.[0]?.searchSuggestions?.map((x: { query: any }) => x.query) ?? []
 
             if (!suggestions.length) {
-                this.bot.logger.warn(this.bot.isMobile, 'SEARCH-BING-SUGGESTIONS', 'No queries')
-                this.bot.logger.debug(
-                    this.bot.isMobile,
-                    'SEARCH-BING-SUGGESTIONS',
-                    `empty suggestions | query="${query}" | lang=${langCode}`
-                )
+                this.logNoQueries('SEARCH-BING-SUGGESTIONS', `empty suggestions | query="${query}" | lang=${langCode}`)
             }
 
             return suggestions
         } catch (error) {
-            this.bot.logger.warn(this.bot.isMobile, 'SEARCH-BING-SUGGESTIONS', 'No queries')
-            this.bot.logger.debug(
-                this.bot.isMobile,
+            this.logNoQueries(
                 'SEARCH-BING-SUGGESTIONS',
-                `request failed | query="${query}" | lang=${langCode} | error=${
-                    error instanceof Error ? `${error.name}: ${error.message}\n${error.stack ?? ''}` : String(error)
-                }`
+                `request failed | query="${query}" | lang=${langCode} | error=${this.formatError(error)}`
             )
             return []
         }
@@ -331,24 +318,12 @@ export class QueryCore {
             const out = Array.isArray(related) ? related : []
 
             if (!out.length) {
-                this.bot.logger.warn(this.bot.isMobile, 'SEARCH-BING-RELATED', 'No queries')
-                this.bot.logger.debug(
-                    this.bot.isMobile,
-                    'SEARCH-BING-RELATED',
-                    `empty related terms | query="${query}"`
-                )
+                this.logNoQueries('SEARCH-BING-RELATED', `empty related terms | query="${query}"`)
             }
 
             return out
         } catch (error) {
-            this.bot.logger.warn(this.bot.isMobile, 'SEARCH-BING-RELATED', 'No queries')
-            this.bot.logger.debug(
-                this.bot.isMobile,
-                'SEARCH-BING-RELATED',
-                `request failed | query="${query}" | error=${
-                    error instanceof Error ? `${error.name}: ${error.message}\n${error.stack ?? ''}` : String(error)
-                }`
-            )
+            this.logNoQueries('SEARCH-BING-RELATED', `request failed | query="${query}" | error=${this.formatError(error)}`)
             return []
         }
     }
@@ -376,24 +351,12 @@ export class QueryCore {
                 ) ?? []
 
             if (!topics.length) {
-                this.bot.logger.warn(this.bot.isMobile, 'SEARCH-BING-TRENDING', 'No queries')
-                this.bot.logger.debug(
-                    this.bot.isMobile,
-                    'SEARCH-BING-TRENDING',
-                    `empty trending topics | lang=${langCode}`
-                )
+                this.logNoQueries('SEARCH-BING-TRENDING', `empty trending topics | lang=${langCode}`)
             }
 
             return topics
         } catch (error) {
-            this.bot.logger.warn(this.bot.isMobile, 'SEARCH-BING-TRENDING', 'No queries')
-            this.bot.logger.debug(
-                this.bot.isMobile,
-                'SEARCH-BING-TRENDING',
-                `request failed | lang=${langCode} | error=${
-                    error instanceof Error ? `${error.name}: ${error.message}\n${error.stack ?? ''}` : String(error)
-                }`
-            )
+            this.logNoQueries('SEARCH-BING-TRENDING', `request failed | lang=${langCode} | error=${this.formatError(error)}`)
             return []
         }
     }
@@ -419,23 +382,14 @@ export class QueryCore {
             const out = articles.slice(0, 50).map(a => a.article.replace(/_/g, ' '))
 
             if (!out.length) {
-                this.bot.logger.warn(this.bot.isMobile, 'SEARCH-WIKIPEDIA-TRENDING', 'No queries')
-                this.bot.logger.debug(
-                    this.bot.isMobile,
-                    'SEARCH-WIKIPEDIA-TRENDING',
-                    `empty wikipedia top | lang=${langCode}`
-                )
+                this.logNoQueries('SEARCH-WIKIPEDIA-TRENDING', `empty wikipedia top | lang=${langCode}`)
             }
 
             return out
         } catch (error) {
-            this.bot.logger.warn(this.bot.isMobile, 'SEARCH-WIKIPEDIA-TRENDING', 'No queries')
-            this.bot.logger.debug(
-                this.bot.isMobile,
+            this.logNoQueries(
                 'SEARCH-WIKIPEDIA-TRENDING',
-                `request failed | lang=${langCode} | error=${
-                    error instanceof Error ? `${error.name}: ${error.message}\n${error.stack ?? ''}` : String(error)
-                }`
+                `request failed | lang=${langCode} | error=${this.formatError(error)}`
             )
             return []
         }
@@ -458,24 +412,12 @@ export class QueryCore {
             const out = posts.filter(p => !p.data.over_18).map(p => p.data.title)
 
             if (!out.length) {
-                this.bot.logger.warn(this.bot.isMobile, 'SEARCH-REDDIT-TRENDING', 'No queries')
-                this.bot.logger.debug(
-                    this.bot.isMobile,
-                    'SEARCH-REDDIT-TRENDING',
-                    `empty reddit listing | subreddit=${safe}`
-                )
+                this.logNoQueries('SEARCH-REDDIT-TRENDING', `empty reddit listing | subreddit=${safe}`)
             }
 
             return out
         } catch (error) {
-            this.bot.logger.warn(this.bot.isMobile, 'SEARCH-REDDIT', 'No queries')
-            this.bot.logger.debug(
-                this.bot.isMobile,
-                'SEARCH-REDDIT',
-                `request failed | subreddit=${subreddit} | error=${
-                    error instanceof Error ? `${error.name}: ${error.message}\n${error.stack ?? ''}` : String(error)
-                }`
-            )
+            this.logNoQueries('SEARCH-REDDIT', `request failed | subreddit=${subreddit} | error=${this.formatError(error)}`)
             return []
         }
     }
@@ -493,24 +435,12 @@ export class QueryCore {
             )
 
             if (!out.length) {
-                this.bot.logger.warn(this.bot.isMobile, 'SEARCH-LOCAL-QUERY-LIST', 'No queries')
-                this.bot.logger.debug(
-                    this.bot.isMobile,
-                    'SEARCH-LOCAL-QUERY-LIST',
-                    'search-queries.json parsed but empty or invalid'
-                )
+                this.logNoQueries('SEARCH-LOCAL-QUERY-LIST', 'search-queries.json parsed but empty or invalid')
             }
 
             return out
         } catch (error) {
-            this.bot.logger.warn(this.bot.isMobile, 'SEARCH-LOCAL-QUERY-LIST', 'No queries')
-            this.bot.logger.debug(
-                this.bot.isMobile,
-                'SEARCH-LOCAL-QUERY-LIST',
-                `read/parse failed | error=${
-                    error instanceof Error ? `${error.name}: ${error.message}\n${error.stack ?? ''}` : String(error)
-                }`
-            )
+            this.logNoQueries('SEARCH-LOCAL-QUERY-LIST', `read/parse failed | error=${this.formatError(error)}`)
             return []
         }
     }

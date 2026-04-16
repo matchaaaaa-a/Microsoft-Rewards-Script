@@ -35,6 +35,14 @@ export class Workers {
         'ww_rewards_banner_search_april_202604'
     ])
 
+    private isExtraSearchOffer(offerId: unknown): boolean {
+        return this.extraSearchOfferIds.has(String(offerId ?? '').toLowerCase())
+    }
+
+    private filterOutExtraSearchOffers<T extends { offerId?: unknown }>(activities: T[]): T[] {
+        return activities.filter(a => !this.isExtraSearchOffer(a.offerId))
+    }
+
     constructor(bot: MicrosoftRewardsBot) {
         this.bot = bot
     }
@@ -51,15 +59,16 @@ export class Workers {
         const todayData = data.dailySetPromotions[todayKey]
 
         const activitiesUncompleted = todayData?.filter(x => !x?.complete && x.pointProgressMax > 0) ?? []
+        const activitiesUncompletedFiltered = this.filterOutExtraSearchOffers(activitiesUncompleted)
 
-        if (!activitiesUncompleted.length) {
+        if (!activitiesUncompletedFiltered.length) {
             this.bot.logger.info(this.bot.isMobile, 'DAILY-SET', 'All "Daily Set" items have already been completed')
             return
         }
 
         this.bot.logger.info(this.bot.isMobile, 'DAILY-SET', 'Started solving "Daily Set" items')
 
-        await this.solveActivities(activitiesUncompleted, page)
+        await this.solveActivities(activitiesUncompletedFiltered, page)
 
         this.bot.logger.info(this.bot.isMobile, 'DAILY-SET', 'All "Daily Set" items have been completed')
     }
@@ -119,7 +128,7 @@ export class Workers {
                 return true
             }) ?? []
 
-        if (!activitiesUncompleted.length) {
+        if (!this.filterOutExtraSearchOffers(activitiesUncompleted).length) {
             this.bot.logger.info(
                 this.bot.isMobile,
                 'MORE-PROMOTIONS',
@@ -131,12 +140,53 @@ export class Workers {
         this.bot.logger.info(
             this.bot.isMobile,
             'MORE-PROMOTIONS',
-            `Started solving ${activitiesUncompleted.length} "More Promotions" items`
+            `Started solving ${this.filterOutExtraSearchOffers(activitiesUncompleted).length} "More Promotions" items`
         )
 
-        await this.solveActivities(activitiesUncompleted, page)
+        await this.solveActivities(this.filterOutExtraSearchOffers(activitiesUncompleted), page)
 
         this.bot.logger.info(this.bot.isMobile, 'MORE-PROMOTIONS', 'All "More Promotion" items have been completed')
+    }
+
+    /**
+     * Run the deferred "extra search" banner offer after normal search counters are done.
+     * Called from `SearchManager` while browser sessions are still open.
+     */
+    public async doDeferredExtraSearch(page: Page): Promise<void> {
+        const data = await this.bot.browser.func.getDashboardData()
+
+        const allDaily = Object.values(data.dailySetPromotions ?? {}).flat()
+        const allMore = [
+            ...(data.morePromotions ?? []),
+            ...(data.morePromotionsWithoutPromotionalItems ?? []),
+            ...(data.promotionalItems ?? [])
+        ]
+
+        const allPunchCardPromos = (data.punchCards ?? []).flatMap(pc => [pc.parentPromotion, ...(pc.childPromotions ?? [])])
+
+        // Dashboard promotion types are structurally compatible, but TS generics differ; cast to the solver shape.
+        const allPromotions: BasePromotion[] = ([...allDaily, ...allMore, ...allPunchCardPromos] as unknown) as BasePromotion[]
+
+        const extraOffers = [
+            ...new Map(
+                allPromotions
+                    .filter(p => this.isExtraSearchOffer(p.offerId))
+                    .filter(p => !p.complete)
+                    .map(p => [p.offerId, p] as const)
+            ).values()
+        ]
+
+        if (!extraOffers.length) {
+            this.bot.logger.debug(this.bot.isMobile, 'DEFERRED-EXTRA', 'No pending extra-search offers found')
+            return
+        }
+
+        this.bot.logger.info(
+            this.bot.isMobile,
+            'DEFERRED-EXTRA',
+            `Solving deferred extra-search offers | count=${extraOffers.length}`
+        )
+        await this.solveActivities(extraOffers, page)
     }
 
     public async doAppPromotions(data: AppDashboardData) {
@@ -239,6 +289,12 @@ export class Workers {
     }
 
     public async doPunchCards(data: DashboardData, page: Page) {
+        this.bot.logger.info(
+            this.bot.isMobile,
+            'PUNCHCARD',
+            `Punchcard flow selected | rewardsVersion=${this.bot.rewardsVersion}`
+        )
+
         if (this.bot.rewardsVersion === 'modern') {
             const modernActivities = await this.getModernPunchCardActivitiesFromRsc()
 
@@ -253,7 +309,15 @@ export class Workers {
                 `Started solving ${modernActivities.length} "Punch Card" items (modern RSC)`
             )
 
-            await this.solveActivities(modernActivities, page)
+            const filteredModernActivities = this.filterOutExtraSearchOffers(
+                modernActivities.filter(activity => !activity.complete)
+            )
+            if (!filteredModernActivities.length) {
+                this.bot.logger.info(this.bot.isMobile, 'PUNCHCARD', 'All modern punchcard activities already completed (extra-search filtered)')
+                return
+            }
+
+            await this.solveActivities(filteredModernActivities, page)
             this.bot.logger.info(this.bot.isMobile, 'PUNCHCARD', 'All "Punch Card" items have been completed')
             return
         }
@@ -261,7 +325,7 @@ export class Workers {
         const punchCards = data.punchCards ?? []
 
         const getLegacyChildType = (x: BasePromotion): string =>
-            (x.promotionType || String(this.getAttributes(x.attributes).type ?? '') || '').toLowerCase()
+            (x.promotionType || String(this.getAttributes(x.attributes).type ?? '')).toLowerCase()
 
         const isLegacyChildCandidate = (x: BasePromotion): boolean => {
             if (x?.complete) return false
@@ -277,7 +341,7 @@ export class Workers {
         const totalActivitiesUncompleted = punchCards.reduce((count, punchCard) => {
             const uncompleted =
                 punchCard.childPromotions?.filter(x => isLegacyChildCandidate(x as BasePromotion)) ?? []
-            return count + uncompleted.length
+            return count + this.filterOutExtraSearchOffers(uncompleted).length
         }, 0)
 
         if (!totalActivitiesUncompleted) {
@@ -295,14 +359,233 @@ export class Workers {
             const activitiesUncompleted: BasePromotion[] =
                 punchCard.childPromotions?.filter(x => isLegacyChildCandidate(x as BasePromotion)) ?? []
 
-            if (!activitiesUncompleted.length) {
-                continue
-            }
+            const activitiesUncompletedFiltered = this.filterOutExtraSearchOffers(activitiesUncompleted)
+            if (!activitiesUncompletedFiltered.length) continue
 
-            await this.solveActivities(activitiesUncompleted, page, punchCard)
+            await this.solveLegacyPunchCardActivities(activitiesUncompletedFiltered, page, punchCard)
         }
 
         this.bot.logger.info(this.bot.isMobile, 'PUNCHCARD', 'All "Punch Card" items have been completed')
+    }
+
+    private buildLegacyPunchCardParentUrl(parentOfferId: string): string {
+        return `https://rewards.bing.com/dashboard/${parentOfferId}`
+    }
+
+    private async fetchLegacyPunchCardParentHtml(parentOfferId: string): Promise<string> {
+        const parentUrl = this.buildLegacyPunchCardParentUrl(parentOfferId)
+        const headers = {
+            ...(this.bot.fingerprint?.headers ?? {}),
+            Cookie: this.bot.browser.func.buildCookieHeader(
+                this.bot.isMobile ? this.bot.cookies.mobile : this.bot.cookies.desktop,
+                ['bing.com', 'live.com', 'microsoftonline.com']
+            ),
+            Referer: 'https://rewards.bing.com/dashboard',
+            Origin: 'https://rewards.bing.com'
+        }
+
+        for (let attempt = 0; attempt < 2; attempt++) {
+            const url = attempt === 0 ? parentUrl : `${parentUrl}?refresh=${Date.now()}`
+            try {
+                const response = await this.bot.axios.request({
+                    method: 'GET',
+                    url,
+                    headers
+                })
+                const html = typeof response.data === 'string' ? response.data : String(response.data ?? '')
+                if (html) {
+                    return html
+                }
+            } catch (error) {
+                const status = (error as { response?: { status?: number } })?.response?.status
+                this.bot.logger.debug(
+                    this.bot.isMobile,
+                    'PUNCHCARD',
+                    `Parent HTML fetch failed | parentOfferId=${parentOfferId} | attempt=${attempt + 1} | status=${status ?? 'n/a'} | error=${error instanceof Error ? error.message : String(error)}`
+                )
+            }
+        }
+
+        return ''
+    }
+
+    private inspectLegacyPunchCardChildState(
+        parentHtml: string,
+        child: BasePromotion
+    ): {
+        complete: boolean
+        isTimeGated: boolean
+        waitingWindow: boolean
+        parentName: string
+    } {
+        const parentName =
+            child.offerId.replace(/_pcchild\d+_.*/i, '_pcparent') ||
+            child.offerId.replace(/_pcchild\d+/i, '_pcparent')
+        const lcHtml = parentHtml.toLowerCase()
+        const childKey = String(child.offerId ?? '').toLowerCase()
+        const childPos = childKey ? lcHtml.indexOf(childKey) : -1
+        const windowText =
+            childPos >= 0
+                ? lcHtml.slice(Math.max(0, childPos - 5000), Math.min(lcHtml.length, childPos + 10000))
+                : lcHtml
+
+        const complete =
+            windowText.includes('offer-complete-card-button') ||
+            windowText.includes('see what\'s inside') ||
+            windowText.includes('win-icon-checkmark') ||
+            child.complete
+
+        const isTimeGated =
+            /\b24\s*hours?\b/i.test(windowText) ||
+            /\b\d+\s*\/\s*\d+\s*days?\b/i.test(windowText) ||
+            /\bconsecutive\s+days?\b/i.test(windowText)
+        const waitingWindow =
+            /\bwait\s+24\s*hours?\b/i.test(windowText) ||
+            /\bcome\s+back\b/i.test(windowText) ||
+            /\bnext\s+punch\b/i.test(windowText)
+
+        return { complete, isTimeGated, waitingWindow, parentName }
+    }
+
+    private async clickLegacyPunchCardCta(
+        page: Page,
+        parentOfferId: string,
+        childIndex: number,
+        child: BasePromotion
+    ): Promise<boolean> {
+        const parentUrl = this.buildLegacyPunchCardParentUrl(parentOfferId)
+        await page.goto(parentUrl, { waitUntil: 'domcontentloaded' })
+        await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {})
+        await this.bot.browser.utils.tryDismissAllMessages(page)
+
+        const clicked = await page.evaluate(
+            ({ offerId, index }) => {
+                const normalize = (s: string) => (s ?? '').toLowerCase()
+                const ctas = Array.from(document.querySelectorAll('div.punchcard-cta.btn'))
+                if (!ctas.length) return false
+
+                const findCardForOffer = () => {
+                    const key = normalize(offerId)
+                    const all = Array.from(document.querySelectorAll('div,section,article,li'))
+                    for (const node of all) {
+                        const text = normalize(node.textContent ?? '')
+                        const html = normalize(node.innerHTML ?? '')
+                        if (!key || (!text.includes(key) && !html.includes(key))) continue
+                        const cta = node.querySelector('div.punchcard-cta.btn') as HTMLElement | null
+                        if (cta) return cta
+                    }
+                    return null
+                }
+
+                const offerCardCta = findCardForOffer()
+                if (offerCardCta) {
+                    offerCardCta.click()
+                    return true
+                }
+
+                const fallback = ctas[index] as HTMLElement | undefined
+                if (!fallback) return false
+                fallback.click()
+                return true
+            },
+            { offerId: child.offerId, index: childIndex }
+        )
+
+        if (!clicked) {
+            return false
+        }
+
+        await this.bot.utils.wait(this.bot.utils.randomDelay(2000, 3500))
+        const pages = page.context().pages()
+        for (const p of pages) {
+            if (p !== page && !p.isClosed()) {
+                await p.close().catch(() => {})
+            }
+        }
+        await page.goto(parentUrl, { waitUntil: 'domcontentloaded' }).catch(() => {})
+        await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {})
+        return true
+    }
+
+    private async solveLegacyPunchCardActivities(activities: BasePromotion[], page: Page, punchCard: PunchCard) {
+        const parentOfferId = String(punchCard.parentPromotion?.offerId ?? '').trim()
+        if (!parentOfferId) {
+            await this.solveActivities(activities, page, punchCard)
+            return
+        }
+
+        let resolvedTimedActivity = false
+        for (let i = 0; i < activities.length; i++) {
+            const activity = activities[i]
+            if (!activity || activity.complete) continue
+
+            try {
+                const parentHtml = await this.fetchLegacyPunchCardParentHtml(parentOfferId)
+                const childState = this.inspectLegacyPunchCardChildState(parentHtml, activity)
+                const progressLabel = `${activity.activityProgress ?? 0}/${activity.activityProgressMax ?? 0}`
+                const scopedName = `${childState.parentName} :: ${activity.offerId}`
+
+                if (childState.complete) {
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'PUNCHCARD',
+                        `Skipping completed legacy child | child=${scopedName} | progress=${progressLabel}`
+                    )
+                    continue
+                }
+
+                if (childState.isTimeGated && (childState.waitingWindow || resolvedTimedActivity)) {
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'PUNCHCARD',
+                        `Skipping gated legacy child for now | child=${scopedName} | waiting=${childState.waitingWindow} | alreadyRanTimed=${resolvedTimedActivity}`
+                    )
+                    continue
+                }
+
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'PUNCHCARD',
+                    `Processing legacy child via parent CTA | parent=${parentOfferId} | child=${scopedName}`
+                )
+
+                const clicked = await this.clickLegacyPunchCardCta(page, parentOfferId, i, activity)
+                if (!clicked) {
+                    this.bot.logger.warn(
+                        this.bot.isMobile,
+                        'PUNCHCARD',
+                        `CTA click failed for legacy child | parent=${parentOfferId} | child=${scopedName}`
+                    )
+                    continue
+                }
+
+                const attrs = this.getAttributes(activity.attributes)
+                const type = (activity.promotionType || String(attrs.type ?? '')).toLowerCase()
+                const titleLower = String(activity.title ?? '').toLowerCase()
+                const descriptionLower = String(activity.description ?? '').toLowerCase()
+                const destinationUrl = String(activity.destinationUrl ?? '').toLowerCase()
+                const isSearchChild =
+                    titleLower.includes('search on bing') ||
+                    descriptionLower.includes('search on bing') ||
+                    destinationUrl.includes('search?q=') ||
+                    String(attrs.isExploreOnBingTask ?? '') === 'True'
+
+                // Legacy punchcard flow should not use UrlReward API fallbacks.
+                if (type === 'urlreward' && isSearchChild) {
+                    await this.bot.activities.doSearchOnBing(activity, page)
+                }
+
+                if (childState.isTimeGated) {
+                    resolvedTimedActivity = true
+                }
+            } catch (error) {
+                this.bot.logger.error(
+                    this.bot.isMobile,
+                    'PUNCHCARD',
+                    `Legacy punchcard child failed | parent=${parentOfferId} | child=${activity.offerId} | error=${error instanceof Error ? error.message : String(error)}`
+                )
+            }
+        }
     }
 
     private buildQuestStateTree(questId: string): string {
@@ -348,8 +631,129 @@ export class Workers {
         return encodeURIComponent(JSON.stringify(tree))
     }
 
+    private parseModernActionTuples(responseText: string): Array<{
+        offerId: string
+        hash: string
+        isPromotional: boolean
+        timezoneOffset: string
+    }> {
+        const tuples: Array<{ offerId: string; hash: string; isPromotional: boolean; timezoneOffset: string }> = []
+        const tupleRegex = /\["([a-f0-9]{40,128})",11,\{([^]*?)\}\]/gi
+
+        for (const match of responseText.matchAll(tupleRegex)) {
+            const hash = match[1] ?? ''
+            const body = match[2] ?? ''
+            const offerIdMatch = body.match(/"offerid":"([^"]+)"/i)
+            if (!offerIdMatch?.[1]) {
+                continue
+            }
+
+            const offerId = offerIdMatch[1]
+            const isPromotionalRaw = body.match(/"isPromotional":"([^"]*)"/i)?.[1] ?? '$undefined'
+            const timezoneOffset = body.match(/"timezoneOffset":"([^"]*)"/i)?.[1] ?? ''
+            const isPromotional = isPromotionalRaw.toLowerCase() === 'true'
+
+            tuples.push({ offerId, hash, isPromotional, timezoneOffset })
+        }
+
+        return tuples
+    }
+
+    private parseModernLevelLockedActivitiesFromRsc(responseText: string): BasePromotion[] {
+        const activities: BasePromotion[] = []
+        const seenOfferIds = new Set<string>()
+        let totalCardsDetected = 0
+        let nonActionableCards = 0
+        // RSC payload can be heavily escaped and span lines; use [\s\S]*? instead of dot-only matching.
+        const cardRegex =
+            /\{\\?"destination\\?":"[\s\S]*?"(?:offerId|offerid)\\?":"[^"]+"[\s\S]*?"hash\\?":"[a-f0-9]{40,128}"[\s\S]*?\}/gi
+        const unescapeValue = (value: string): string =>
+            value
+                .replace(/\\u0026/gi, '&')
+                .replace(/\\u003d/gi, '=')
+                .replace(/\\\//g, '/')
+                .replace(/\\"/g, '"')
+
+        const readField = (card: string, field: string): string => {
+            const escaped = card.match(new RegExp(`\\\\"${field}\\\\":\\"([^\\"]*)\\"`, 'i'))?.[1]
+            if (escaped !== undefined) return unescapeValue(escaped)
+            const plain = card.match(new RegExp(`"${field}":"([^"]*)"`, 'i'))?.[1]
+            return plain ? unescapeValue(plain) : ''
+        }
+        const readBooleanField = (card: string, field: string): boolean => {
+            const escaped = card.match(new RegExp(`\\\\"${field}\\\\":(true|false)`, 'i'))?.[1]
+            const plain = card.match(new RegExp(`"${field}":(true|false)`, 'i'))?.[1]
+            return (escaped ?? plain ?? '').toLowerCase() === 'true'
+        }
+        const readNumericField = (card: string, field: string): number => {
+            const escaped = card.match(new RegExp(`\\\\"${field}\\\\":(-?\\d+)`, 'i'))?.[1]
+            const plain = card.match(new RegExp(`"${field}":(-?\\d+)`, 'i'))?.[1]
+            return Number(escaped ?? plain ?? 0)
+        }
+
+        for (const match of responseText.matchAll(cardRegex)) {
+            const card = match[0] ?? ''
+            totalCardsDetected++
+            const offerId = readField(card, 'offerId')
+            if (!offerId || seenOfferIds.has(offerId)) continue
+
+            const destinationUrl = readField(card, 'destination')
+            const hash = readField(card, 'hash')
+            if (!destinationUrl || !hash) continue
+
+            const isPromotionalRaw = readField(card, 'isPromotional').toLowerCase()
+            const isPromotional = isPromotionalRaw === 'true'
+            const points = readNumericField(card, 'points')
+            seenOfferIds.add(offerId)
+            const title = readField(card, 'title') || offerId
+            const description = readField(card, 'description')
+            const isCompleted = readBooleanField(card, 'isCompleted')
+            const isLocked = readBooleanField(card, 'isLocked')
+            const isActionable = !isPromotional && points > 0
+            if (!isActionable) {
+                nonActionableCards++
+            }
+
+            activities.push(({
+                offerId,
+                title,
+                description,
+                name: readField(card, 'name') || offerId,
+                destinationUrl,
+                promotionType: 'urlreward',
+                // Keep non-actionable cards detectable in logs while skipping execution safely.
+                complete: isCompleted || !isActionable,
+                exclusiveLockedFeatureStatus: isLocked ? 'locked' : 'unlocked',
+                hash,
+                pointProgress: 0,
+                pointProgressMax: Math.max(points, 0),
+                activityProgress: 0,
+                activityProgressMax: 0,
+                attributes: {
+                    offerid: offerId,
+                    destination: destinationUrl,
+                    description,
+                    title,
+                    max: String(Math.max(points, 0)),
+                    points: String(Math.max(points, 0)),
+                    isActionable: isActionable ? 'true' : 'false',
+                    isPromotional: isPromotional ? 'true' : '$undefined'
+                }
+            } as unknown) as BasePromotion)
+        }
+
+        this.bot.logger.debug(
+            this.bot.isMobile,
+            'PUNCHCARD',
+            `Modern activityCards parsed | detected=${totalCardsDetected} | mapped=${activities.length} | nonActionable=${nonActionableCards}`
+        )
+
+        return activities
+    }
+
     private async getModernPunchCardActivitiesFromRsc(): Promise<BasePromotion[]> {
         try {
+            this.bot.logger.info(this.bot.isMobile, 'PUNCHCARD', 'Fetching modern earn RSC activity list')
             const cookieHeader = this.bot.browser.func.buildCookieHeader(
                 this.bot.isMobile ? this.bot.cookies.mobile : this.bot.cookies.desktop,
                 ['bing.com', 'live.com', 'microsoftonline.com']
@@ -369,8 +773,14 @@ export class Workers {
             }
 
             const earnResponse = await this.bot.axios.request(earnRequest)
+            this.bot.logger.info(
+                this.bot.isMobile,
+                'PUNCHCARD',
+                `Fetched modern earn RSC activity list | status=${earnResponse.status}`
+            )
             const earnText =
                 typeof earnResponse.data === 'string' ? earnResponse.data : JSON.stringify(earnResponse.data ?? {})
+            const levelLockedActivities = this.parseModernLevelLockedActivitiesFromRsc(earnText)
 
             const questIds: string[] = [
                 ...new Set(
@@ -380,12 +790,12 @@ export class Workers {
                 )
             ]
 
-            if (!questIds.length) {
+            if (!questIds.length && !levelLockedActivities.length) {
                 return []
             }
 
-            const activities: BasePromotion[] = []
-            const seenOfferIds = new Set<string>()
+            const activities: BasePromotion[] = [...levelLockedActivities]
+            const seenOfferIds = new Set<string>(levelLockedActivities.map(x => x.offerId))
 
             for (const questId of questIds) {
                 const stateTree = this.buildQuestStateTree(questId)
@@ -416,12 +826,18 @@ export class Workers {
                             .filter((value): value is string => Boolean(value))
                     )
                 ]
+                const tupleEntries = this.parseModernActionTuples(questText).filter(
+                    entry => /_pcchild\d+_/i.test(entry.offerId) && !entry.isPromotional
+                )
+                const tupleByOfferId = new Map(tupleEntries.map(entry => [entry.offerId, entry] as const))
+                const allOfferIds = [...new Set([...childOfferIds, ...tupleEntries.map(entry => entry.offerId)])]
 
-                for (const offerId of childOfferIds) {
+                for (const offerId of allOfferIds) {
                     if (seenOfferIds.has(offerId)) continue
                     seenOfferIds.add(offerId)
+                    const tupleEntry = tupleByOfferId.get(offerId)
 
-                    activities.push({
+                    activities.push(({
                         offerId,
                         title: `Quest activity ${offerId}`,
                         name: offerId,
@@ -429,15 +845,24 @@ export class Workers {
                         promotionType: 'urlreward',
                         complete: false,
                         exclusiveLockedFeatureStatus: 'unlocked',
-                        attributes: {}
-                    } as BasePromotion)
+                        hash: tupleEntry?.hash,
+                        attributes: {
+                            offerid: offerId,
+                            ...(tupleEntry
+                                ? {
+                                      isPromotional: tupleEntry.isPromotional ? 'true' : '$undefined',
+                                      timezoneOffset: tupleEntry.timezoneOffset
+                                  }
+                                : {})
+                        }
+                    } as unknown) as BasePromotion)
                 }
             }
 
             this.bot.logger.debug(
                 this.bot.isMobile,
                 'PUNCHCARD',
-                `Modern RSC punchcard detection | quests=${questIds.length} | activities=${activities.length}`
+                `Modern RSC detection | quests=${questIds.length} | levelLocked=${levelLockedActivities.length} | activities=${activities.length}`
             )
 
             return activities
@@ -456,6 +881,7 @@ export class Workers {
         if (!punchCard) {
             return false
         }
+        const attrs = this.getAttributes(activity.attributes)
 
         const descriptionText = [
             activity.title,
@@ -463,8 +889,8 @@ export class Workers {
             activity.linkText,
             punchCard.parentPromotion?.title,
             punchCard.parentPromotion?.description,
-            String(this.getAttributes(activity.attributes).description ?? ''),
-            String(this.getAttributes(activity.attributes).title ?? '')
+            String(attrs.description ?? ''),
+            String(attrs.title ?? '')
         ]
             .filter(Boolean)
             .join(' ')
@@ -489,9 +915,9 @@ export class Workers {
         for (const activity of activities) {
             try {
                 const attrs = this.getAttributes(activity.attributes)
-                const type = (activity.promotionType || String(attrs.type ?? '') || '').toLowerCase()
+                const type = (activity.promotionType || String(attrs.type ?? '')).toLowerCase()
                 const name = activity.name?.toLowerCase() ?? ''
-                const offerId = (activity as BasePromotion).offerId
+                const offerId = activity.offerId
                 const destinationUrl = activity.destinationUrl?.toLowerCase() ?? ''
                 const isPunchCardChildOffer = /_pcchild\d+_/i.test(offerId)
 
@@ -513,7 +939,7 @@ export class Workers {
                 switch (type) {
                     // Quiz-like activities (Poll / regular quiz variants)
                     case 'quiz': {
-                        const basePromotion = activity as BasePromotion
+                        const basePromotion = activity
 
                         // Poll (usually 10 points, pollscenarioid in URL)
                         if (activity.pointProgressMax === 10 && destinationUrl.includes('pollscenarioid')) {
@@ -540,7 +966,7 @@ export class Workers {
 
                     // UrlReward
                     case 'urlreward': {
-                        const basePromotion = activity as BasePromotion
+                        const basePromotion = activity
 
                         // Search on Bing are subtypes of "urlreward"
                         const titleLower = activity.title?.toLowerCase() ?? ''
@@ -556,33 +982,92 @@ export class Workers {
                             isExtraSearchOffer
 
                         if (isExploreOnBing) {
+                            const pointProgress = Number(basePromotion.pointProgress ?? attrs.progress ?? 0)
+                            const pointProgressMax = Number(basePromotion.pointProgressMax ?? attrs.max ?? 0)
+                            const completeRaw = attrs.complete
+                            const attrsComplete =
+                                typeof completeRaw === 'string' ? completeRaw.toLowerCase() === 'true' : Boolean(completeRaw)
+                            const isAlreadyCompleted =
+                                basePromotion.complete ||
+                                attrsComplete ||
+                                (pointProgressMax > 0 && pointProgress >= pointProgressMax)
+
+                            if (isAlreadyCompleted) {
+                                this.bot.logger.info(
+                                    this.bot.isMobile,
+                                    'ACTIVITY',
+                                    `Skipping SearchOnBing activity already completed | title="${activity.title}" | offerId=${offerId} | progress=${pointProgress}/${pointProgressMax}`
+                                )
+                                break
+                            }
+
                             if (isExtraSearchOffer) {
-                                const pointProgress = Number(basePromotion.pointProgress ?? attrs.progress ?? 0)
-                                const pointProgressMax = Number(basePromotion.pointProgressMax ?? attrs.max ?? 0)
-                                const completeRaw = attrs.complete
-                                const attrsComplete =
-                                    typeof completeRaw === 'string'
-                                        ? completeRaw.toLowerCase() === 'true'
-                                        : Boolean(completeRaw)
-                                const isAlreadyCompleted =
-                                    basePromotion.complete ||
-                                    attrsComplete ||
-                                    (pointProgressMax > 0 && pointProgress >= pointProgressMax)
-
-                                if (isAlreadyCompleted) {
-                                    this.bot.logger.info(
-                                        this.bot.isMobile,
-                                        'ACTIVITY',
-                                        `Skipping extra SearchOnBing activity already completed | title="${activity.title}" | offerId=${offerId} | progress=${pointProgress}/${pointProgressMax}`
-                                    )
-                                    break
-                                }
-
                                 this.bot.logger.info(
                                     this.bot.isMobile,
                                     'ACTIVITY',
                                     `Detected extra search offer, forcing SearchOnBing flow | offerId=${offerId}`
                                 )
+
+                                try {
+                                    const dashboardData = await this.bot.browser.func.getDashboardData()
+                                    const dashboardDailySet = Object.values(dashboardData.dailySetPromotions ?? {}).flat()
+                                    const dashboardPunchCards = (dashboardData.punchCards ?? []).flatMap(x => [
+                                        ...(x.childPromotions ?? []),
+                                        ...(x.parentPromotion ? [x.parentPromotion] : [])
+                                    ])
+                                    const allDashboardPromotions = [
+                                        ...(dashboardData.morePromotions ?? []),
+                                        ...(dashboardData.morePromotionsWithoutPromotionalItems ?? []),
+                                        ...(dashboardData.promotionalItems ?? []),
+                                        ...dashboardDailySet,
+                                        ...dashboardPunchCards
+                                    ]
+
+                                    const offerKey = offerId.toLowerCase()
+                                    const matchedDashboardOffer = allDashboardPromotions.find(x => {
+                                        const topLevelOfferId = String(x.offerId ?? '').toLowerCase()
+                                        const dashboardAttrs = this.getAttributes(x.attributes)
+                                        const attrOfferId = String(
+                                            dashboardAttrs.offerid ?? dashboardAttrs.offerId ?? ''
+                                        ).toLowerCase()
+                                        return topLevelOfferId === offerKey || attrOfferId === offerKey
+                                    })
+
+                                    if (matchedDashboardOffer) {
+                                        const dashboardAttrs = this.getAttributes(matchedDashboardOffer.attributes)
+                                        const dashboardProgress = Number(
+                                            matchedDashboardOffer.pointProgress ?? dashboardAttrs.progress ?? 0
+                                        )
+                                        const dashboardProgressMax = Number(
+                                            matchedDashboardOffer.pointProgressMax ?? dashboardAttrs.max ?? 0
+                                        )
+                                        const dashboardCompleteRaw = dashboardAttrs.complete
+                                        const dashboardAttrsComplete =
+                                            typeof dashboardCompleteRaw === 'string'
+                                                ? dashboardCompleteRaw.toLowerCase() === 'true'
+                                                : Boolean(dashboardCompleteRaw)
+                                        const isDashboardCompleted =
+                                            Boolean(matchedDashboardOffer.complete) ||
+                                            dashboardAttrsComplete ||
+                                            (dashboardProgressMax > 0 && dashboardProgress >= dashboardProgressMax)
+
+                                        if (isDashboardCompleted) {
+                                            this.bot.logger.info(
+                                                this.bot.isMobile,
+                                                'ACTIVITY',
+                                                `Skipping extra SearchOnBing activity already completed (dashboard) | title="${activity.title}" | offerId=${offerId} | progress=${dashboardProgress}/${dashboardProgressMax}`
+                                            )
+                                            break
+                                        }
+                                    }
+                                } catch (dashboardCheckError) {
+                                    this.bot.logger.debug(
+                                        this.bot.isMobile,
+                                        'ACTIVITY',
+                                        `Extra search dashboard pre-check failed, continuing | offerId=${offerId} | error=${dashboardCheckError instanceof Error ? dashboardCheckError.message : String(dashboardCheckError)}`
+                                    )
+                                }
+
                                 this.bot.logger.info(
                                     this.bot.isMobile,
                                     'ACTIVITY',
