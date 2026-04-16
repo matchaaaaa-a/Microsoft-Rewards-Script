@@ -616,19 +616,41 @@ export default class BrowserFunc {
     }
 
     buildCookieHeader(cookies: Cookie[], allowedDomains?: string[]): string {
-        return [
-            ...new Map(
-                cookies
-                    .filter(c => {
-                        if (!allowedDomains || allowedDomains.length === 0) return true
-                        return (
-                            typeof c.domain === 'string' &&
-                            allowedDomains.some(d => c.domain.toLowerCase().endsWith(d.toLowerCase()))
-                        )
-                    })
-                    .map(c => [c.name, c])
-            ).values()
-        ]
+        const filtered = cookies
+            .filter(c => {
+                if (!allowedDomains || allowedDomains.length === 0) return true
+                return (
+                    typeof c.domain === 'string' &&
+                    allowedDomains.some(d => c.domain.toLowerCase().endsWith(d.toLowerCase()))
+                )
+            })
+
+        // For duplicate cookie names, prefer a non-empty value (for auth cookies like _C_Auth),
+        // otherwise keep the latest value.
+        const latestByName = new Map<string, Cookie>()
+        for (const cookie of filtered) {
+            const existing = latestByName.get(cookie.name)
+            if (!existing) {
+                latestByName.set(cookie.name, cookie)
+                continue
+            }
+
+            const existingHasValue = String(existing.value ?? '').length > 0
+            const nextHasValue = String(cookie.value ?? '').length > 0
+
+            if (!existingHasValue && nextHasValue) {
+                latestByName.set(cookie.name, cookie)
+                continue
+            }
+            if (existingHasValue && !nextHasValue) {
+                continue
+            }
+
+            // If both are empty or both have values, keep the latest one.
+            latestByName.set(cookie.name, cookie)
+        }
+
+        return [...latestByName.values()]
             .map(c => `${c.name}=${c.value}`)
             .join('; ')
     }

@@ -57,7 +57,6 @@ export class RecoveryLogin {
                 }
 
                 this.bot.logger.info(this.bot.isMobile, 'LOGIN-RECOVERY', 'Waiting for page response')
-                await this.bot.utils.wait(500)
                 await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {
                     this.bot.logger.debug(this.bot.isMobile, 'LOGIN-RECOVERY', 'Network idle timeout reached')
                 })
@@ -135,13 +134,10 @@ export class RecoveryLogin {
                     if (attempt === this.maxManualAttempts) {
                         throw new Error('Email input field not found after maximum attempts')
                     }
-
-                    await this.bot.utils.wait(1000)
                     continue
                 }
 
                 this.bot.logger.info(this.bot.isMobile, 'LOGIN-RECOVERY', 'Waiting for page response')
-                await this.bot.utils.wait(500)
                 await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {
                     this.bot.logger.debug(this.bot.isMobile, 'LOGIN-RECOVERY', 'Network idle timeout reached')
                 })
@@ -168,8 +164,6 @@ export class RecoveryLogin {
                     } else {
                         this.bot.logger.warn(this.bot.isMobile, 'LOGIN-RECOVERY', 'Could not find input field to clear')
                     }
-
-                    await this.bot.utils.wait(1000)
                     continue
                 }
 

@@ -1,7 +1,35 @@
-import type { AxiosRequestConfig, AxiosResponse, InternalAxiosRequestConfig } from 'axios'
 import { Session } from 'httpcloak'
 import { URL } from 'url'
 import type { AccountProxy } from '../interface/Account'
+
+type PrimitiveParam = string | number | boolean
+
+interface HttpRequestAuth {
+    username: string
+    password?: string
+}
+
+interface HttpRequestConfig {
+    url?: string
+    method?: string
+    headers?: Record<string, unknown> | { toJSON?: () => unknown }
+    params?: Record<string, unknown>
+    timeout?: number
+    auth?: HttpRequestAuth
+    data?: any
+    validateStatus?: ((status: number) => boolean) | null
+    responseType?: string
+    [key: string]: any
+}
+
+interface HttpResponse<TData = any> {
+    data: TData
+    status: number
+    statusText: string
+    headers: Record<string, unknown>
+    config: HttpRequestConfig
+    request: undefined
+}
 
 const DEFAULT_RETRY_STATUS_CODES = [429, 500, 501, 502, 503, 504, 505, 506, 507, 508, 510, 511]
 const DESKTOP_PRESET = 'chrome-146-windows'
@@ -14,7 +42,7 @@ const BASE_SESSION_OPTIONS = {
     retryOnStatus: DEFAULT_RETRY_STATUS_CODES
 } as const
 
-class AxiosClient {
+class HttpCloakClient {
     private desktopSession: Session
     private mobileSession: Session
     private directDesktopSession: Session
@@ -22,10 +50,9 @@ class AxiosClient {
     private account: AccountProxy
     private debugEnabled: boolean
 
-    constructor(account: AccountProxy, _options?: { debug?: boolean }) {
+    constructor(account: AccountProxy, options?: { debug?: boolean }) {
         this.account = account
-        // Keep httpcloak logs silent to avoid noisy console output.
-        this.debugEnabled = false
+        this.debugEnabled = Boolean(options?.debug)
 
         this.directDesktopSession = new Session({
             ...BASE_SESSION_OPTIONS,
@@ -78,7 +105,7 @@ class AxiosClient {
         return proxyUrl
     }
 
-    private normalizeHeaders(headers?: AxiosRequestConfig['headers']): Record<string, string> | undefined {
+    private normalizeHeaders(headers?: HttpRequestConfig['headers']): Record<string, string> | undefined {
         if (!headers) return undefined
 
         const maybeHeaders = headers as { toJSON?: () => unknown }
@@ -94,10 +121,10 @@ class AxiosClient {
         )
     }
 
-    private normalizeParams(params: AxiosRequestConfig['params']): Record<string, string | number | boolean> | undefined {
+    private normalizeParams(params: HttpRequestConfig['params']): Record<string, PrimitiveParam> | undefined {
         if (!params || typeof params !== 'object' || Array.isArray(params)) return undefined
 
-        const out: Record<string, string | number | boolean> = {}
+        const out: Record<string, PrimitiveParam> = {}
         for (const [key, value] of Object.entries(params as Record<string, unknown>)) {
             if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
                 out[key] = value
@@ -120,7 +147,7 @@ class AxiosClient {
         return value === undefined || value === null ? '' : String(value)
     }
 
-    private parseResponseData(response: { text: string; headers: Record<string, unknown> }): unknown {
+    private parseResponseData(response: { text: string; headers: Record<string, unknown> }): any {
         const contentType = this.getHeaderAsString(response.headers, 'content-type').toLowerCase()
         const trimmed = response.text.trim()
         const looksLikeJson =
@@ -136,39 +163,16 @@ class AxiosClient {
         return response.text
     }
 
-    private maskHeaderValue(key: string, value: string): string {
-        const lowerKey = key.toLowerCase()
-        if (
-            lowerKey.includes('cookie') ||
-            lowerKey.includes('authorization') ||
-            lowerKey.includes('token') ||
-            lowerKey.includes('api-key') ||
-            lowerKey.includes('apikey') ||
-            lowerKey.includes('x-ms-client-request-id')
-        ) {
-            if (!value) return value
-            return `${value.slice(0, 12)}...`
-        }
-        return value
-    }
-
-    private maskSensitiveInBody(body: string): string {
-        return body
-            .replace(/(__RequestVerificationToken=)[^&]+/gi, '$1***')
-            .replace(/(Authorization["']?\s*:\s*["'])[^"']+/gi, '$1***')
-            .replace(/(Bearer\s+)[A-Za-z0-9\-._~+/=]+/gi, '$1***')
-    }
-
     private stringifyPayloadForLog(body: unknown, json: unknown): string {
         if (typeof body === 'string') {
-            return this.maskSensitiveInBody(body).slice(0, 800)
+            return body.slice(0, 2000)
         }
         if (Buffer.isBuffer(body)) {
             return `[buffer length=${body.length}]`
         }
         if (json && typeof json === 'object') {
             try {
-                return this.maskSensitiveInBody(JSON.stringify(json)).slice(0, 800)
+                return JSON.stringify(json).slice(0, 2000)
             } catch {
                 return '[json payload]'
             }
@@ -183,23 +187,20 @@ class AxiosClient {
         method: string,
         url: string,
         headers: Record<string, string> | undefined,
-        params: Record<string, string | number | boolean> | undefined,
+        params: Record<string, PrimitiveParam> | undefined,
         body: unknown,
         json: unknown
     ): void {
         if (!this.debugEnabled) return
-        const safeHeaders = Object.fromEntries(
-            Object.entries(headers ?? {}).map(([key, value]) => [key, this.maskHeaderValue(key, value)])
-        )
         const payload = this.stringifyPayloadForLog(body, json)
         console.log(
-            `[HTTPCLOAK][REQ] ${method} ${url} | headers=${JSON.stringify(safeHeaders)} | params=${JSON.stringify(params ?? {})} | payload=${payload}`
+            `[HTTPCLOAK][REQ] ${method} ${url} | headers=${JSON.stringify(headers ?? {})} | params=${JSON.stringify(params ?? {})} | payload=${payload}`
         )
     }
 
     private logResponse(method: string, url: string, statusCode: number, responseText: string): void {
         if (!this.debugEnabled) return
-        const snippet = this.maskSensitiveInBody(responseText).slice(0, 800)
+        const snippet = responseText.slice(0, 2000)
         console.log(`[HTTPCLOAK][RES] ${method} ${url} | status=${statusCode} | body=${snippet}`)
     }
 
@@ -224,7 +225,16 @@ class AxiosClient {
         return lowerUrl.includes('/api/mobile') || lowerUrl.includes('microsoft.com/rewardsapp')
     }
 
-    public async request(config: AxiosRequestConfig, bypassProxy = false): Promise<AxiosResponse> {
+    public async requestHttpcloak(
+        config: HttpRequestConfig,
+        bypassProxy = false
+    ): Promise<{
+        status: number
+        statusText: string
+        headers: Record<string, unknown>
+        text: string
+        data: unknown
+    }> {
         if (!config.url) {
             throw new Error('Request URL is required')
         }
@@ -271,33 +281,42 @@ class AxiosClient {
         })
         this.logResponse(method, config.url, response.statusCode, response.text)
 
-        const responseConfig: InternalAxiosRequestConfig = {
-            ...(config as InternalAxiosRequestConfig),
-            headers: (config.headers ?? {}) as InternalAxiosRequestConfig['headers']
-        }
-
-        const axiosLikeResponse: AxiosResponse = {
-            data: this.parseResponseData(response),
+        const normalizedResponse = {
             status: response.statusCode,
             statusText: response.reason ?? '',
             headers: response.headers,
-            config: responseConfig,
-            request: undefined
+            text: response.text,
+            data: this.parseResponseData(response)
         }
 
         const validateStatus = config.validateStatus ?? ((status: number) => status >= 200 && status < 300)
         if (!validateStatus(response.statusCode)) {
             const error = new Error(`Request failed with status code ${response.statusCode}`) as Error & {
-                response: AxiosResponse
-                config: AxiosRequestConfig
+                response: typeof normalizedResponse
+                config: HttpRequestConfig
             }
-            error.response = axiosLikeResponse
+            error.response = normalizedResponse
             error.config = config
             throw error
+        }
+
+        return normalizedResponse
+    }
+
+    public async request(config: HttpRequestConfig, bypassProxy = false): Promise<HttpResponse> {
+        const normalizedResponse = await this.requestHttpcloak(config, bypassProxy)
+
+        const axiosLikeResponse: HttpResponse = {
+            data: normalizedResponse.data,
+            status: normalizedResponse.status,
+            statusText: normalizedResponse.statusText,
+            headers: normalizedResponse.headers,
+            config,
+            request: undefined
         }
 
         return axiosLikeResponse
     }
 }
 
-export default AxiosClient
+export default HttpCloakClient

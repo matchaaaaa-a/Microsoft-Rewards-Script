@@ -78,7 +78,6 @@ export class Login {
                     waitUntil: 'domcontentloaded'
                 })
                 .catch(() => {})
-            await this.bot.utils.wait(2000)
             await this.bot.browser.utils.reloadBadPage(page)
             await this.bot.browser.utils.disableFido(page)
 
@@ -114,7 +113,6 @@ export class Login {
                             `Stuck in state "${state}" for 4 loops, refreshing page`
                         )
                         await page.reload({ waitUntil: 'domcontentloaded' })
-                        await this.bot.utils.wait(3000)
                         sameStateCount = 0
                         previousState = 'UNKNOWN'
                         continue
@@ -133,8 +131,6 @@ export class Login {
                 if (!shouldContinue) {
                     throw new Error(`Login failed or aborted at state: ${state}`)
                 }
-
-                await this.bot.utils.wait(1000)
             }
 
             if (iteration >= maxIterations) {
@@ -397,7 +393,6 @@ export class Login {
                             timeout: 10000
                         })
                         .catch(() => {})
-                    await this.bot.utils.wait(3000)
                     this.bot.logger.info(this.bot.isMobile, 'LOGIN', 'Recovery navigation successful')
                     return true
                 } catch {
@@ -408,7 +403,6 @@ export class Login {
                             timeout: 10000
                         })
                         .catch(() => {})
-                    await this.bot.utils.wait(3000)
                     this.bot.logger.info(this.bot.isMobile, 'LOGIN', 'Fallback navigation successful')
                     return true
                 }
@@ -673,7 +667,6 @@ export class Login {
                         'GET-REWARD-SESSION',
                         `Retry attempt ${retry}/${retryMax - 1} - reloading page`
                     )
-                    await this.bot.utils.wait(2000)
                 }
 
                 await page
@@ -749,8 +742,6 @@ export class Login {
                             `Not at reward home: ${u.hostname}${u.pathname}`
                         )
                     }
-
-                    await this.bot.utils.wait(1000)
                 }
 
                 this.bot.logger.debug(
@@ -786,14 +777,6 @@ export class Login {
             }
 
             const claimToken = this.bot.requestToken
-            const endpoints = ['https://rewards.bing.com/api/claimallpointsasync']
-            let success = false
-            let lastEndpointError = ''
-
-            const claimParams = new URLSearchParams({
-                timeZone: '0',
-                __RequestVerificationToken: claimToken
-            })
 
             // First try through in-page fetch so anti-forgery token + cookies stay in the same browser session context.
             try {
@@ -853,7 +836,7 @@ export class Login {
                 this.bot.logger.debug(
                     this.bot.isMobile,
                     'CLAIM-ALL-POINTS',
-                    `Browser-context claim failed, trying HTTP fallback | status=${browserResult.status} ${
+                    `Browser-context claim failed | status=${browserResult.status} ${
                         browserBodySnippet ? `| body=${browserBodySnippet}` : ''
                     }`
                 )
@@ -861,92 +844,11 @@ export class Login {
                 this.bot.logger.debug(
                     this.bot.isMobile,
                     'CLAIM-ALL-POINTS',
-                    `Browser-context claim error, trying HTTP fallback | error=${browserError instanceof Error ? browserError.message : String(browserError)}`
+                    `Browser-context claim error | error=${browserError instanceof Error ? browserError.message : String(browserError)}`
                 )
             }
 
-            for (const endpoint of endpoints) {
-                try {
-                    const currentCookies = await page.context().cookies()
-                    const cookieHeader = currentCookies
-                        .map((c: { name: string; value: string }) => `${c.name}=${c.value}`)
-                        .join('; ')
-
-                    const request = {
-                        url: `${endpoint}?X-Requested-With=XMLHttpRequest`,
-                        method: 'POST',
-                        headers: {
-                            ...(this.bot.fingerprint?.headers ?? {}),
-                            'accept': 'application/json, text/javascript, */*; q=0.01',
-                            'accept-encoding': 'gzip, deflate, br, zstd',
-                            'accept-language': 'en-US',
-                            'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
-                            'correlation-context': 'v=1,ms.b.tel.market=en-US',
-                            'origin': 'https://rewards.bing.com',
-                            'priority': 'u=1, i',
-                            'referer': 'https://rewards.bing.com/',
-                            'sec-ch-ua': this.bot.isMobile
-                                ? '"Microsoft Edge";v="144", "Not=A?Brand";v="99", "Chromium";v="144"'
-                                : '"Microsoft Edge";v="144", "Not=A?Brand";v="99", "Chromium";v="144"',
-                            'sec-ch-ua-arch': this.bot.isMobile ? 'arm' : 'arm',
-                            'sec-ch-ua-bitness': this.bot.isMobile ? '64' : '64',
-                            'sec-ch-ua-full-version': this.bot.isMobile ? '"143.0.7499.4"' : '"143.0.7499.4"',
-                            'sec-ch-ua-full-version-list': this.bot.isMobile
-                                ? '"Microsoft Edge";v="144.0.3719.81", "Not=A?Brand";v="99.0.0.0", "Chromium";v="144.0.7559.96"'
-                                : '"Microsoft Edge";v="144.0.3719.81", "Not=A?Brand";v="99.0.0.0", "Chromium";v="144.0.7559.96"',
-                            'sec-ch-ua-mobile': this.bot.isMobile ? '?1' : '?0',
-                            'sec-ch-ua-model': this.bot.isMobile ? '""' : '""',
-                            'sec-ch-ua-platform': this.bot.isMobile ? '"Android"' : '"macOS"',
-                            'sec-ch-ua-platform-version': this.bot.isMobile ? '""' : '"10"',
-                            'sec-fetch-dest': 'empty',
-                            'sec-fetch-mode': 'cors',
-                            'sec-fetch-site': 'same-origin',
-                            'cookie': cookieHeader
-                        },
-                        data: claimParams
-                    }
-
-                    const response = await this.bot.axios.request(request)
-
-                    if (response.data && typeof response.data === 'object') {
-                        const data = response.data
-
-                        if (data.balance !== undefined && typeof data.balance === 'number') {
-                            const pointsEarned = data.activity?.points || 0
-                            this.bot.userData.currentPoints = data.balance
-                            this.bot.logger.info(
-                                this.bot.isMobile,
-                                'CLAIM-ALL-POINTS',
-                                `✅ Claimed all available points | earned=${pointsEarned} | balance=${data.balance}`
-                            )
-                        }
-                    }
-
-                    success = true
-                    break
-
-                } catch (error) {
-                    const message = error instanceof Error ? error.message : String(error)
-                    const maybeResponse = error as { response?: { status?: number; data?: unknown } }
-                    const status = maybeResponse.response?.status
-                    const responseData = maybeResponse.response?.data
-                    const bodySnippet =
-                        typeof responseData === 'string'
-                            ? responseData.slice(0, 300)
-                            : responseData && typeof responseData === 'object'
-                              ? JSON.stringify(responseData).slice(0, 300)
-                              : ''
-
-                    lastEndpointError = `endpoint=${endpoint} | status=${status ?? 'n/a'} | message=${message}${
-                        bodySnippet ? ` | body=${bodySnippet}` : ''
-                    }`
-                    continue
-                }
-            }
-
-            if (!success) {
-                throw new Error(`Failed to claim all points${lastEndpointError ? ` | ${lastEndpointError}` : ''}`)
-            }
+            throw new Error('Failed to claim all points via browser context request')
 
         } catch (error) {
             this.bot.logger.warn(

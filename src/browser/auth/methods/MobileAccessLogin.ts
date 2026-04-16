@@ -86,7 +86,6 @@ export class MobileAccessLogin {
                             await btn.click().catch(() => {})
                             await this.page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {})
                             this.bot.logger.info(this.bot.isMobile, 'LOGIN-APP', 'Passkey dismissed')
-                            await this.bot.utils.wait(2000)
                             continue
                         }
                     }

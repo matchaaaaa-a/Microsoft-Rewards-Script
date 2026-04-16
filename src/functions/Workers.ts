@@ -1,5 +1,6 @@
 import type { Page } from 'patchright'
 import type { AxiosRequestConfig } from 'axios'
+import * as fs from 'fs'
 import type { MicrosoftRewardsBot } from '../index'
 import type {
     DashboardData,
@@ -43,6 +44,26 @@ export class Workers {
         return activities.filter(a => !this.isExtraSearchOffer(a.offerId))
     }
 
+    private isModernPunchCardOfferId(offerId: unknown): boolean {
+        const value = String(offerId ?? '').toLowerCase()
+        if (!value) return false
+        return /_pcchild\d+_/i.test(value) || /_pcparent_/i.test(value)
+    }
+
+    private isModernPunchCardDestination(destinationUrl: unknown): boolean {
+        const value = String(destinationUrl ?? '').toLowerCase()
+        if (!value) return false
+        return /\/earn\/quest\/[^"\s]*pcparent/i.test(value)
+    }
+
+    private isModernPunchCardActivity(activity: BasePromotion): boolean {
+        return (
+            this.isModernPunchCardOfferId(activity.offerId) ||
+            this.isModernPunchCardDestination(activity.destinationUrl) ||
+            this.isModernPunchCardOfferId(this.getAttributes(activity.attributes).offerid)
+        )
+    }
+
     constructor(bot: MicrosoftRewardsBot) {
         this.bot = bot
     }
@@ -52,6 +73,87 @@ export class Workers {
             return {}
         }
         return attributes as Record<string, unknown>
+    }
+
+    private async refreshSessionCookiesFromPage(page: Page): Promise<void> {
+        try {
+            const latestCookies = await page.context().cookies()
+            if (this.bot.isMobile) {
+                this.bot.cookies.mobile = latestCookies
+            } else {
+                this.bot.cookies.desktop = latestCookies
+            }
+            this.bot.logger.debug(
+                this.bot.isMobile,
+                'PUNCHCARD',
+                `Refreshed cookie jar from active page context | count=${latestCookies.length}`
+            )
+        } catch (error) {
+            this.bot.logger.warn(
+                this.bot.isMobile,
+                'PUNCHCARD',
+                `Failed to refresh cookies from active page context | error=${error instanceof Error ? error.message : String(error)}`
+            )
+        }
+    }
+
+    private getActiveRewardsPage(preferredPage?: Page): Page {
+        if (preferredPage && !preferredPage.isClosed()) {
+            return preferredPage
+        }
+
+        const fallbackPage = this.bot.isMobile ? this.bot.mainMobilePage : this.bot.mainDesktopPage
+        if (fallbackPage && !fallbackPage.isClosed()) {
+            return fallbackPage
+        }
+
+        throw new Error('No active rewards page available for browser-context request')
+    }
+
+    private async fetchRscWithBrowserContext(
+        page: Page,
+        url: string,
+        headers: Record<string, string>
+    ): Promise<{ status: number; text: string }> {
+        try {
+            const response = await page.context().request.get(url, {
+                failOnStatusCode: false,
+                headers
+            })
+
+            return {
+                status: response.status(),
+                text: await response.text()
+            }
+        } catch (contextRequestError) {
+            this.bot.logger.debug(
+                this.bot.isMobile,
+                'PUNCHCARD',
+                `Context request failed, using page fetch fallback | error=${
+                    contextRequestError instanceof Error ? contextRequestError.message : String(contextRequestError)
+                }`
+            )
+
+            return await page.evaluate(
+                async ({ requestUrl, requestHeaders }) => {
+                    const response = await fetch(requestUrl, {
+                        method: 'GET',
+                        credentials: 'include',
+                        cache: 'no-store',
+                        headers: requestHeaders
+                    })
+
+                    return {
+                        status: response.status,
+                        text: await response.text()
+                    }
+                },
+                {
+                    requestUrl: url,
+                    requestHeaders: headers
+                }
+            )
+        }
     }
 
     public async doDailySet(data: DashboardData, page: Page) {
@@ -289,6 +391,7 @@ export class Workers {
     }
 
     public async doPunchCards(data: DashboardData, page: Page) {
+        await this.refreshSessionCookiesFromPage(page)
         this.bot.logger.info(
             this.bot.isMobile,
             'PUNCHCARD',
@@ -296,7 +399,7 @@ export class Workers {
         )
 
         if (this.bot.rewardsVersion === 'modern') {
-            const modernActivities = await this.getModernPunchCardActivitiesFromRsc()
+            const modernActivities = await this.getModernPunchCardActivitiesFromRsc(page)
 
             if (!modernActivities.length) {
                 this.bot.logger.info(this.bot.isMobile, 'PUNCHCARD', 'No modern punchcard activities found in earn RSC')
@@ -659,7 +762,7 @@ export class Workers {
         return tuples
     }
 
-    private parseModernLevelLockedActivitiesFromRsc(responseText: string): BasePromotion[] {
+    private parseModernActivityCardsFromRsc(responseText: string): BasePromotion[] {
         const activities: BasePromotion[] = []
         const seenOfferIds = new Set<string>()
         let totalCardsDetected = 0
@@ -751,86 +854,402 @@ export class Workers {
         return activities
     }
 
-    private async getModernPunchCardActivitiesFromRsc(): Promise<BasePromotion[]> {
-        try {
-            this.bot.logger.info(this.bot.isMobile, 'PUNCHCARD', 'Fetching modern earn RSC activity list')
-            const cookieHeader = this.bot.browser.func.buildCookieHeader(
-                this.bot.isMobile ? this.bot.cookies.mobile : this.bot.cookies.desktop,
-                ['bing.com', 'live.com', 'microsoftonline.com']
-            )
+    private parseModernQuestCtaActivitiesFromRsc(responseText: string, questId: string): BasePromotion[] {
+        const activities: BasePromotion[] = []
+        const seenOfferIds = new Set<string>()
+        const offerRegex = /\\?"offerId\\?":"([^"]+)"/gi
+        const getField = (chunk: string, key: string): string => {
+            const escaped = chunk.match(new RegExp(`\\\\"${key}\\\\":\\"([^\\"]*)\\"`, 'i'))?.[1]
+            if (escaped !== undefined) return escaped
+            return chunk.match(new RegExp(`"${key}":"([^"]*)"`, 'i'))?.[1] ?? ''
+        }
+        const getBoolField = (chunk: string, key: string): boolean => {
+            const escaped = chunk.match(new RegExp(`\\\\"${key}\\\\":(true|false)`, 'i'))?.[1]
+            const plain = chunk.match(new RegExp(`"${key}":(true|false)`, 'i'))?.[1]
+            return (escaped ?? plain ?? '').toLowerCase() === 'true'
+        }
+        const decode = (value: string): string =>
+            value
+                .replace(/\\u0026/gi, '&')
+                .replace(/\\u003d/gi, '=')
+                .replace(/\\\//g, '/')
+                .replace(/\\"/g, '"')
 
-            const earnRequest: AxiosRequestConfig = {
-                url: 'https://rewards.bing.com/earn?_rsc=b1l97',
-                method: 'GET',
-                headers: {
-                    ...(this.bot.fingerprint?.headers ?? {}),
-                    accept: '*/*',
-                    rsc: '1',
-                    Cookie: cookieHeader,
-                    Referer: 'https://rewards.bing.com/earn',
-                    Origin: 'https://rewards.bing.com'
+        for (const match of responseText.matchAll(offerRegex)) {
+            const offerId = String(match[1] ?? '')
+            if (!offerId || offerId === '$undefined' || seenOfferIds.has(offerId)) continue
+
+            const idx = match.index ?? 0
+            const chunk = responseText.slice(Math.max(0, idx - 1800), Math.min(responseText.length, idx + 2200))
+            const hash = getField(chunk, 'hash')
+            if (!hash || hash === '$undefined') continue
+
+            // Quest detail page uses "href" for CTA target rather than "destination".
+            const href = decode(getField(chunk, 'href'))
+            const title = decode(getField(chunk, 'title')) || `Quest activity ${offerId}`
+            const description = decode(getField(chunk, 'description'))
+            const isCompleted = getBoolField(chunk, 'isCompleted')
+            const isLocked = getBoolField(chunk, 'isLocked')
+            const isPromotional = getBoolField(chunk, 'isPromotional')
+
+            if (isPromotional) continue
+            seenOfferIds.add(offerId)
+
+            activities.push(({
+                offerId,
+                title,
+                description,
+                name: offerId,
+                destinationUrl: href || `https://rewards.bing.com/earn/quest/${questId}`,
+                promotionType: 'urlreward',
+                complete: isCompleted,
+                exclusiveLockedFeatureStatus: isLocked ? 'locked' : 'unlocked',
+                hash,
+                pointProgress: 0,
+                pointProgressMax: 0,
+                activityProgress: 0,
+                activityProgressMax: 0,
+                attributes: {
+                    offerid: offerId,
+                    destination: href,
+                    description,
+                    title,
+                    isPromotional: '$undefined'
                 }
-            }
+            } as unknown) as BasePromotion)
+        }
 
-            const earnResponse = await this.bot.axios.request(earnRequest)
+        return activities
+    }
+
+    private parseParentQuestIdsFromRsc(responseText: string): string[] {
+        const normalize = (value: string): string =>
+            value
+                .replace(/\\\//g, '/')
+                .replace(/\?.*$/, '')
+                .trim()
+
+        const fromLinks = [...responseText.matchAll(/\\?\/earn\\?\/quest\\?\/([^"\\?]+?pcparent[^"\\?]*)/gi)].map(m =>
+            normalize(m[1] ?? '')
+        )
+        const fromQuestKey = [...responseText.matchAll(/"questId","([^"]*?pcparent[^"]*)"/gi)].map(m =>
+            normalize(m[1] ?? '')
+        )
+        const fromBareParent = [...responseText.matchAll(/\b([A-Za-z0-9]+_pcparent_[A-Za-z0-9_]+)\b/gi)].map(m =>
+            normalize(m[1] ?? '')
+        )
+
+        return [...new Set([...fromLinks, ...fromQuestKey, ...fromBareParent].filter(Boolean))]
+    }
+
+    private parseModernQuestHashPairsFromRsc(responseText: string, questId: string): BasePromotion[] {
+        const activities: BasePromotion[] = []
+        const seenOfferIds = new Set<string>()
+
+        const pushFromPair = (offerIdRaw: string, hashRaw: string): void => {
+            const offerId = String(offerIdRaw ?? '').trim()
+            const hash = String(hashRaw ?? '').trim().toLowerCase()
+            if (!offerId || !hash || seenOfferIds.has(offerId)) return
+            if (!this.isModernPunchCardOfferId(offerId) && !this.isModernPunchCardOfferId(questId)) return
+
+            seenOfferIds.add(offerId)
+            activities.push(({
+                offerId,
+                title: `Quest activity ${offerId}`,
+                name: offerId,
+                destinationUrl: `https://rewards.bing.com/earn/quest/${questId}`,
+                promotionType: 'urlreward',
+                complete: false,
+                exclusiveLockedFeatureStatus: 'unlocked',
+                hash,
+                pointProgress: 0,
+                pointProgressMax: 0,
+                activityProgress: 0,
+                activityProgressMax: 0,
+                attributes: {
+                    offerid: offerId,
+                    isPromotional: '$undefined'
+                }
+            } as unknown) as BasePromotion)
+        }
+
+        const plainRegex = /"offerId":"([^"]+)"[^]*?"hash":"([a-f0-9]{40,128})"/gi
+        for (const match of responseText.matchAll(plainRegex)) {
+            pushFromPair(match[1] ?? '', match[2] ?? '')
+        }
+
+        const escapedRegex = /\\"offerId\\":\\"([^\\"]+)\\"[^]*?\\"hash\\":\\"([a-f0-9]{40,128})\\"/gi
+        for (const match of responseText.matchAll(escapedRegex)) {
+            pushFromPair(match[1] ?? '', match[2] ?? '')
+        }
+
+        return activities
+    }
+
+    private buildModernEarnRscRequest(cookieHeader: string): AxiosRequestConfig {
+        const fingerprintUserAgent = String(
+            this.bot.fingerprint?.headers?.['user-agent'] ?? this.bot.fingerprint?.headers?.['User-Agent'] ?? ''
+        ).trim()
+        return {
+            url: 'https://rewards.bing.com/earn?_rsc=b1l97',
+            method: 'GET',
+            headers: {
+                accept: '*/*',
+                rsc: '1',
+                Cookie: cookieHeader,
+                Referer: 'https://rewards.bing.com/earn',
+                Origin: 'https://rewards.bing.com',
+                ...(fingerprintUserAgent ? { 'user-agent': fingerprintUserAgent } : {})
+            }
+        }
+    }
+
+    private async fetchModernEarnRsc(
+        preferredPage?: Page
+    ): Promise<{ text: string; cookieHeader: string; status: number; requestUrl: string }> {
+        const page = this.getActiveRewardsPage(preferredPage)
+        await this.refreshSessionCookiesFromPage(page)
+
+        const cookieHeader = this.bot.browser.func.buildCookieHeader(
+            this.bot.isMobile ? this.bot.cookies.mobile : this.bot.cookies.desktop,
+            ['bing.com', 'live.com', 'microsoftonline.com']
+        )
+        const earnRequest = this.buildModernEarnRscRequest(cookieHeader)
+        const requestUrl = String(earnRequest.url ?? 'https://rewards.bing.com/earn?_rsc=b1l97')
+
+        const earnResult = await this.fetchRscWithBrowserContext(page, requestUrl, {
+            accept: '*/*',
+            rsc: '1',
+            Referer: 'https://rewards.bing.com/earn',
+            Origin: 'https://rewards.bing.com',
+            ...(typeof earnRequest.headers?.['user-agent'] === 'string'
+                ? { 'user-agent': earnRequest.headers['user-agent'] }
+                : {})
+        })
+
+        return {
+            text: earnResult.text,
+            cookieHeader,
+            status: earnResult.status,
+            requestUrl
+        }
+    }
+
+    private async getModernPunchCardActivitiesFromRsc(preferredPage?: Page): Promise<BasePromotion[]> {
+        try {
+            const page = this.getActiveRewardsPage(preferredPage)
+            this.bot.logger.info(this.bot.isMobile, 'PUNCHCARD', 'Fetching modern earn RSC activity list')
+            const { text: earnText, cookieHeader, status: earnStatus, requestUrl: earnRequestUrl } =
+                await this.fetchModernEarnRsc(page)
+            const hasAuthCookieInHeader = /(?:^|;\s*)_C_Auth=[^;]+/i.test(cookieHeader)
             this.bot.logger.info(
                 this.bot.isMobile,
                 'PUNCHCARD',
-                `Fetched modern earn RSC activity list | status=${earnResponse.status}`
+                `Cookie header snapshot | length=${cookieHeader.length} | hasNonEmpty_C_Auth=${hasAuthCookieInHeader}`
             )
-            const earnText =
-                typeof earnResponse.data === 'string' ? earnResponse.data : JSON.stringify(earnResponse.data ?? {})
-            const levelLockedActivities = this.parseModernLevelLockedActivitiesFromRsc(earnText)
+            const parsedEarnRscId = (() => {
+                try {
+                    const earnId = new URL(earnRequestUrl).searchParams.get('_rsc')
+                    const normalized = String(earnId ?? '').trim()
+                    return normalized ? normalized.replace(/[^a-zA-Z0-9_-]/g, '_') : 'unknown'
+                } catch {
+                    return 'unknown'
+                }
+            })()
+            const responseDumpPath = `response_${parsedEarnRscId}.json`
+            const questResponseDumps: Array<{
+                questId: string
+                url: string
+                status?: number
+                body?: string
+                error?: string
+            }> = []
+            const writeModernRscDump = (parentQuestIds: string[]): void => {
+                try {
+                    const responseDump = {
+                        fetchedAt: new Date().toISOString(),
+                        earn: {
+                            url: earnRequestUrl,
+                            status: earnStatus,
+                            body: earnText
+                        },
+                        parentQuestIds,
+                        quests: questResponseDumps
+                    }
+                    fs.writeFileSync(responseDumpPath, JSON.stringify(responseDump, null, 2), 'utf8')
+                    this.bot.logger.info(this.bot.isMobile, 'PUNCHCARD', `Wrote full RSC response dump to ${responseDumpPath}`)
+                } catch (writeError) {
+                    this.bot.logger.warn(
+                        this.bot.isMobile,
+                        'PUNCHCARD',
+                        `Failed writing full RSC response dump | error=${writeError instanceof Error ? writeError.message : String(writeError)}`
+                    )
+                }
+            }
+            this.bot.logger.info(
+                this.bot.isMobile,
+                'PUNCHCARD',
+                `Fetched modern earn RSC activity list | status=${earnStatus}`
+            )
+            const earnSnippet = earnText.replace(/\s+/g, ' ').slice(0, 1500)
+            const parentPatternHits = (earnText.match(/pcparent/gi) ?? []).length
+            const questLinkHits = (earnText.match(/\/earn\/quest\//gi) ?? []).length
+            this.bot.logger.info(
+                this.bot.isMobile,
+                'PUNCHCARD',
+                `EARN RSC echo | length=${earnText.length} | pcparentHits=${parentPatternHits} | questLinkHits=${questLinkHits}`
+            )
+            this.bot.logger.info(
+                this.bot.isMobile,
+                'PUNCHCARD',
+                `EARN RSC snippet: ${earnSnippet}`
+            )
+            const activityCardActivities = this.parseModernActivityCardsFromRsc(earnText).filter(activity =>
+                this.isModernPunchCardActivity(activity)
+            )
 
-            const questIds: string[] = [
-                ...new Set(
-                    [...earnText.matchAll(/\/earn\/quest\/([^"\\?]+?pcparent[^"\\?]*)/gi)]
-                        .map(m => m[1])
-                        .filter((value): value is string => Boolean(value))
-                )
-            ]
+            let questIds: string[] = this.parseParentQuestIdsFromRsc(earnText)
 
-            if (!questIds.length && !levelLockedActivities.length) {
+            if (!questIds.length) {
+                const derivedParents = [
+                    ...new Set(
+                        [...earnText.matchAll(/([A-Za-z0-9]+_pcchild\d+_[A-Za-z0-9_]+)/gi)]
+                            .map(m => m[1] ?? '')
+                            .filter(Boolean)
+                            .map(offerId =>
+                                offerId
+                                    .replace(/_pcchild\d+_.*/i, match => match.replace(/_pcchild\d+_.*/i, '_pcparent'))
+                                    .replace(/_pcchild\d+_/i, '_pcparent_')
+                            )
+                            .filter(parentId => /pcparent/i.test(parentId))
+                    )
+                ]
+                if (derivedParents.length) {
+                    questIds = derivedParents
+                    this.bot.logger.info(
+                        this.bot.isMobile,
+                        'PUNCHCARD',
+                        `Recovered parent quest IDs from child offerIds | count=${questIds.length}`
+                    )
+                }
+            }
+
+            this.bot.logger.info(
+                this.bot.isMobile,
+                'PUNCHCARD',
+                `Detected parent quest IDs from earn RSC | count=${questIds.length} | ids=${questIds.join(', ') || 'none'}`
+            )
+
+            if (!questIds.length && !activityCardActivities.length) {
+                writeModernRscDump(questIds)
                 return []
             }
 
-            const activities: BasePromotion[] = [...levelLockedActivities]
-            const seenOfferIds = new Set<string>(levelLockedActivities.map(x => x.offerId))
+            const activities: BasePromotion[] = [...activityCardActivities]
+            const seenOfferIds = new Set<string>(activityCardActivities.map(x => x.offerId))
 
             for (const questId of questIds) {
-                const stateTree = this.buildQuestStateTree(questId)
-                const questRequest: AxiosRequestConfig = {
-                    url: `https://rewards.bing.com/earn/quest/${questId}?_rsc=178ia`,
-                    method: 'GET',
-                    headers: {
-                        ...(this.bot.fingerprint?.headers ?? {}),
+                this.bot.logger.info(
+                    this.bot.isMobile,
+                    'PUNCHCARD',
+                    `Fetching parent quest details via RSC | parent=${questId}`
+                )
+                const questUrl = `https://rewards.bing.com/earn/quest/${questId}`
+                const fingerprintUserAgent = String(
+                    this.bot.fingerprint?.headers?.['user-agent'] ?? this.bot.fingerprint?.headers?.['User-Agent'] ?? ''
+                ).trim()
+
+                let questText = ''
+                const questRequestUrl = `${questUrl}?_rsc=178ia`
+                try {
+                    const stateTree = this.buildQuestStateTree(questId)
+                    const questResponse = await this.fetchRscWithBrowserContext(page, questRequestUrl, {
                         accept: '*/*',
                         rsc: '1',
                         'next-router-state-tree': stateTree,
-                        Cookie: cookieHeader,
-                        Referer: `https://rewards.bing.com/earn/quest/${questId}`,
-                        Origin: 'https://rewards.bing.com'
+                        Referer: questUrl,
+                        ...(fingerprintUserAgent ? { 'user-agent': fingerprintUserAgent } : {})
+                    })
+                    questText = questResponse.text
+
+                    const isAuthRedirectPayload =
+                        /NEXT_REDIRECT;replace;https:\/\/login\.windows\.net\/consumers\/oauth2\/v2\.0\/authorize/i.test(
+                            questText
+                        ) || /"HeaderProfile_Login"/i.test(questText)
+                    if (isAuthRedirectPayload) {
+                        this.bot.logger.warn(
+                            this.bot.isMobile,
+                            'PUNCHCARD',
+                            `Parent quest RSC returned login redirect payload | parent=${questId}`
+                        )
+
+                        // Retry once with simplified headers (without state-tree) to avoid fragile server-side route checks.
+                        const retryResponse = await this.fetchRscWithBrowserContext(page, questRequestUrl, {
+                            accept: '*/*',
+                            rsc: '1',
+                            Referer: questUrl,
+                            ...(fingerprintUserAgent ? { 'user-agent': fingerprintUserAgent } : {})
+                        })
+                        const retryText = retryResponse.text
+                        const retryStillRedirect =
+                            /NEXT_REDIRECT;replace;https:\/\/login\.windows\.net\/consumers\/oauth2\/v2\.0\/authorize/i.test(
+                                retryText
+                            ) || /"HeaderProfile_Login"/i.test(retryText)
+
+                        if (!retryStillRedirect) {
+                            questText = retryText
+                            this.bot.logger.info(
+                                this.bot.isMobile,
+                                'PUNCHCARD',
+                                `Recovered parent quest RSC payload on retry | parent=${questId} | status=${retryResponse.status}`
+                            )
+                        } else {
+                            this.bot.logger.warn(
+                                this.bot.isMobile,
+                                'PUNCHCARD',
+                                `Retry also returned login redirect payload | parent=${questId}`
+                            )
+                        }
                     }
+
+                    questResponseDumps.push({
+                        questId,
+                        url: questRequestUrl,
+                        status: questResponse.status,
+                        body: questText
+                    })
+                } catch (questRscError) {
+                    questResponseDumps.push({
+                        questId,
+                        url: questRequestUrl,
+                        error: questRscError instanceof Error ? questRscError.message : String(questRscError)
+                    })
+                    this.bot.logger.debug(
+                        this.bot.isMobile,
+                        'PUNCHCARD',
+                        `Parent quest RSC fetch failed | parent=${questId} | error=${questRscError instanceof Error ? questRscError.message : String(questRscError)}`
+                    )
+                    continue
                 }
 
-                const questResponse = await this.bot.axios.request(questRequest)
-                const questText =
-                    typeof questResponse.data === 'string'
-                        ? questResponse.data
-                        : JSON.stringify(questResponse.data ?? {})
+                const questCtaActivities = this.parseModernQuestCtaActivitiesFromRsc(questText, questId)
+                for (const activity of questCtaActivities) {
+                    if (seenOfferIds.has(activity.offerId)) continue
+                    seenOfferIds.add(activity.offerId)
+                    activities.push(activity)
+                }
 
-                const childOfferIds: string[] = [
-                    ...new Set(
-                        [...questText.matchAll(/"offerId":"([^"]*?_pcchild\d+_[^"]*)"/gi)]
-                            .map(m => m[1])
-                            .filter((value): value is string => Boolean(value))
-                    )
-                ]
-                const tupleEntries = this.parseModernActionTuples(questText).filter(
-                    entry => /_pcchild\d+_/i.test(entry.offerId) && !entry.isPromotional
-                )
+                const questCardActivities = this.parseModernActivityCardsFromRsc(questText)
+                for (const activity of questCardActivities) {
+                    if (!this.isModernPunchCardActivity(activity)) continue
+                    if (seenOfferIds.has(activity.offerId)) continue
+                    seenOfferIds.add(activity.offerId)
+                    activities.push(activity)
+                }
+
+                const tupleEntries = this.parseModernActionTuples(questText).filter(entry => !entry.isPromotional)
                 const tupleByOfferId = new Map(tupleEntries.map(entry => [entry.offerId, entry] as const))
-                const allOfferIds = [...new Set([...childOfferIds, ...tupleEntries.map(entry => entry.offerId)])]
+                const allOfferIds = [...new Set(tupleEntries.map(entry => entry.offerId))]
 
                 for (const offerId of allOfferIds) {
                     if (seenOfferIds.has(offerId)) continue
@@ -857,12 +1276,21 @@ export class Workers {
                         }
                     } as unknown) as BasePromotion)
                 }
+
+                const fallbackQuestHashActivities = this.parseModernQuestHashPairsFromRsc(questText, questId)
+                for (const activity of fallbackQuestHashActivities) {
+                    if (seenOfferIds.has(activity.offerId)) continue
+                    seenOfferIds.add(activity.offerId)
+                    activities.push(activity)
+                }
             }
+
+            writeModernRscDump(questIds)
 
             this.bot.logger.debug(
                 this.bot.isMobile,
                 'PUNCHCARD',
-                `Modern RSC detection | quests=${questIds.length} | levelLocked=${levelLockedActivities.length} | activities=${activities.length}`
+                `Modern RSC detection | quests=${questIds.length} | activityCards=${activityCardActivities.length} | activities=${activities.length}`
             )
 
             return activities
@@ -1182,6 +1610,15 @@ export class Workers {
                                         'ACTIVITY',
                                         `Quest flow failed for exploreonbing | offerId=${offerId} | error=${questError instanceof Error ? questError.message : String(questError)}`
                                     )
+                                }
+
+                                if (this.bot.rewardsVersion === 'modern') {
+                                    this.bot.logger.info(
+                                        this.bot.isMobile,
+                                        'ACTIVITY',
+                                        `Skipping SearchOnBing fallback for modern punchcard child | title="${activity.title}" | offerId=${offerId}`
+                                    )
+                                    break
                                 }
                             }
                             // Try panel flyout method (works without requestToken)

@@ -86,7 +86,6 @@ export class CodeLogin {
                     continue
                 }
 
-                await this.bot.utils.wait(500)
                 await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {})
 
                 // Check if wrong code was entered

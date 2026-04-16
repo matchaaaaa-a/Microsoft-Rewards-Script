@@ -1,4 +1,5 @@
 import type { AxiosRequestConfig } from 'axios'
+import type { Page } from 'patchright'
 import type { BasePromotion } from '../../../interface/DashboardData'
 import type { PanelFlyoutData } from '../../../interface/PanelFlyoutData'
 import { Workers } from '../../Workers'
@@ -13,6 +14,105 @@ export class UrlRewardNew extends Workers {
     private gainedPoints: number = 0
 
     private oldBalance: number = this.bot.userData.currentPoints
+
+    private getPromotionAttributes(attributes: unknown): Record<string, unknown> {
+        if (!attributes || typeof attributes !== 'object' || Array.isArray(attributes)) {
+            return {}
+        }
+        return attributes as Record<string, unknown>
+    }
+
+    private resolveTimezoneOffset(promotion: BasePromotion): string {
+        const attrs = this.getPromotionAttributes(promotion.attributes)
+        const fromAttrs = String(attrs.timezoneOffset ?? '').trim()
+        if (fromAttrs) {
+            return fromAttrs
+        }
+
+        return String(new Date().getTimezoneOffset())
+    }
+
+    private getActiveRewardsPageForUrlReward(): Page {
+        const page = this.bot.isMobile ? this.bot.mainMobilePage : this.bot.mainDesktopPage
+        if (!page || page.isClosed()) {
+            throw new Error('No active rewards page available for UrlReward browser-context request')
+        }
+        return page
+    }
+
+    private async requestWithBrowserContext(
+        request: AxiosRequestConfig
+    ): Promise<{ status: number; data: string }> {
+        const page = this.getActiveRewardsPageForUrlReward()
+        const method = String(request.method ?? 'GET').toUpperCase()
+        const url = String(request.url ?? '')
+        const headers = (request.headers ?? {}) as Record<string, string>
+
+        try {
+            const response =
+                method === 'POST'
+                    ? await page.context().request.post(url, {
+                          failOnStatusCode: false,
+                          headers,
+                          data:
+                              typeof request.data === 'string'
+                                  ? request.data
+                                  : request.data !== undefined
+                                    ? JSON.stringify(request.data)
+                                    : undefined
+                      })
+                    : await page.context().request.get(url, {
+                          failOnStatusCode: false,
+                          headers
+                      })
+
+            return {
+                status: response.status(),
+                data: await response.text()
+            }
+        } catch (contextError) {
+            this.bot.logger.debug(
+                this.bot.isMobile,
+                'URL-REWARD',
+                `Browser-context request failed, trying page fetch fallback | method=${method} | url=${url} | error=${
+                    contextError instanceof Error ? contextError.message : String(contextError)
+                }`
+            )
+
+            const result = await page.evaluate(
+                async ({ requestUrl, requestMethod, requestHeaders, requestBody }) => {
+                    const response = await fetch(requestUrl, {
+                        method: requestMethod,
+                        credentials: 'include',
+                        cache: 'no-store',
+                        headers: requestHeaders,
+                        body: requestMethod === 'POST' ? requestBody : undefined
+                    })
+
+                    return {
+                        status: response.status,
+                        data: await response.text()
+                    }
+                },
+                {
+                    requestUrl: url,
+                    requestMethod: method,
+                    requestHeaders: headers,
+                    requestBody:
+                        typeof request.data === 'string'
+                            ? request.data
+                            : request.data !== undefined
+                              ? JSON.stringify(request.data)
+                              : undefined
+                }
+            )
+
+            return {
+                status: result.status,
+                data: result.data
+            }
+        }
+    }
 
     private redactHeaders(headers: Record<string, string>): Record<string, string> {
         const clone = { ...headers }
@@ -108,9 +208,8 @@ export class UrlRewardNew extends Workers {
             `Fetching quest RSC for punchcard hash | offerId=${offerId} | questId=${questId}`
         )
 
-        const response = await this.bot.axios.request(request)
-        const responseText =
-            typeof response.data === 'string' ? response.data : JSON.stringify(response.data ?? {})
+        const response = await this.requestWithBrowserContext(request)
+        const responseText = response.data
         const escapedOfferId = offerId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
         const hashRegex = new RegExp(`"offerId":"${escapedOfferId}".*?"hash":"([a-f0-9]{40,128})"`, 'is')
         const match = responseText.match(hashRegex)
@@ -148,7 +247,9 @@ export class UrlRewardNew extends Workers {
         return undefined
     }
 
-    private async submitModernPunchCardQuestAction(offerId: string, questId: string): Promise<number> {
+    private async submitModernPunchCardQuestAction(promotion: BasePromotion, questId: string): Promise<number> {
+        const offerId = promotion.offerId
+        const timezoneOffset = this.resolveTimezoneOffset(promotion)
         const stateTreeGet = this.buildStateTree(questId)
         const stateTreePost = this.buildStateTree(questId, true)
         const referer = `https://rewards.bing.com/earn/quest/${questId}`
@@ -173,9 +274,8 @@ export class UrlRewardNew extends Workers {
             `Fetching modern quest action context | offerId=${offerId} | questId=${questId}`
         )
 
-        const getResponse = await this.bot.axios.request(getRequest)
-        const responseText =
-            typeof getResponse.data === 'string' ? getResponse.data : JSON.stringify(getResponse.data ?? {})
+        const getResponse = await this.requestWithBrowserContext(getRequest)
+        const responseText = getResponse.data
 
         const sessionId = responseText.match(/\b[a-f0-9]{64}\b/i)?.[0]
         const nextAction = this.modernQuestNextAction
@@ -190,7 +290,7 @@ export class UrlRewardNew extends Workers {
             {
                 offerid: offerId,
                 isPromotional: '$undefined',
-                timezoneOffset: '-480'
+                timezoneOffset
             }
         ]
 
@@ -223,11 +323,8 @@ export class UrlRewardNew extends Workers {
             `Modern quest POST request | url=${postRequest.url} | headers=${JSON.stringify(this.redactHeaders(postRequest.headers as Record<string, string>))} | body=${typeof postRequest.data === 'string' ? postRequest.data : JSON.stringify(postRequest.data)}`
         )
 
-        const postResponse = await this.bot.axios.request(postRequest)
-        const postBody =
-            typeof postResponse.data === 'string'
-                ? postResponse.data
-                : JSON.stringify(postResponse.data ?? {})
+        const postResponse = await this.requestWithBrowserContext(postRequest)
+        const postBody = postResponse.data
         this.bot.logger.debug(
             this.bot.isMobile,
             'URL-REWARD',
@@ -265,10 +362,24 @@ export class UrlRewardNew extends Workers {
             const questId = this.buildQuestIdFromOfferId(offerId)
             const useQuestFlow = this.bot.rewardsVersion === 'modern' && !!questId
             let responseStatus = 0
+            let shouldUsePanelFlow = !useQuestFlow
 
             if (useQuestFlow && questId) {
-                responseStatus = await this.submitModernPunchCardQuestAction(offerId, questId)
-            } else {
+                try {
+                    responseStatus = await this.submitModernPunchCardQuestAction(promotion, questId)
+                } catch (questFlowError) {
+                    shouldUsePanelFlow = true
+                    this.bot.logger.warn(
+                        this.bot.isMobile,
+                        'URL-REWARD',
+                        `Modern quest flow failed, falling back to panel/hash flow | offerId=${offerId} | questId=${questId} | message=${
+                            questFlowError instanceof Error ? questFlowError.message : String(questFlowError)
+                        }`
+                    )
+                }
+            }
+
+            if (shouldUsePanelFlow) {
                 const panelData: PanelFlyoutData | undefined = this.bot.panelData
                 const todayKey = this.bot.utils.getFormattedDate()
                 const panelMorePromotions = panelData?.flyoutResult?.morePromotions ?? []

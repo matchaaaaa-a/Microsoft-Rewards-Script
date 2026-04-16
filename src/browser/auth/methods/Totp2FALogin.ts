@@ -62,7 +62,6 @@ export class TotpLogin {
                     throw new Error('TOTP input field not found')
                 }
 
-                await this.bot.utils.wait(500)
                 await this.bot.browser.utils.ghostClick(page, this.submitButtonSelector)
                 await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {})
 
@@ -112,7 +111,6 @@ export class TotpLogin {
                     continue
                 }
 
-                await this.bot.utils.wait(500)
                 await this.bot.browser.utils.ghostClick(page, this.submitButtonSelector)
                 await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {})
 

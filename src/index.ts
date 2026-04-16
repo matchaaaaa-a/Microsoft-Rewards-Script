@@ -20,7 +20,7 @@ import Activities from './functions/Activities'
 import { SearchManager } from './functions/SearchManager'
 
 import type { Account } from './interface/Account'
-import AxiosClient from './util/httpcloak'
+import HttpCloakClient from './util/httpcloak'
 import { sendDiscord, flushDiscordQueue } from './logging/Discord'
 import { sendNtfy, flushNtfyQueue } from './logging/Ntfy'
 import type { DashboardData } from './interface/DashboardData'
@@ -117,7 +117,10 @@ export class MicrosoftRewardsBot {
     private login = new Login(this)
     private searchManager: SearchManager
 
-    public axios!: AxiosClient
+    public httpcloak!: HttpCloakClient
+    public get axios(): HttpCloakClient {
+        return this.httpcloak
+    }
 
     constructor() {
         this.userData = {
@@ -330,7 +333,7 @@ export class MicrosoftRewardsBot {
                     `Starting account: ${accountEmail} | geoLocale: ${account.geoLocale}`
                 )
 
-                this.axios = new AxiosClient(account.proxy, { debug: this.config.debugLogs })
+                this.httpcloak = new HttpCloakClient(account.proxy, { debug: this.config.debugLogs })
 
                 const result: { initialPoints: number; collectedPoints: number } | undefined = await this.Main(
                     account
