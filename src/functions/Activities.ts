@@ -9,6 +9,7 @@ import { AppReward } from './activities/app/AppReward'
 // API
 import { UrlReward } from './activities/api/UrlReward'
 import { UrlRewardNew } from './activities/api/UrlRewardNew'
+import { ExploreOnBingActivation } from './activities/api/ExploreOnBingActivation'
 import { Quiz } from './activities/api/Quiz'
 import { FindClippy } from './activities/api/FindClippy'
 import { DoubleSearchPoints } from './activities/api/DoubleSearchPoints'
@@ -73,6 +74,11 @@ export default class Activities {
     doDaily = async (promotion: BasePromotion): Promise<void> => {
         const urlReward = new UrlRewardNew(this.bot)
         await urlReward.doUrlReward(promotion)
+    }
+
+    doExploreOnBingActivation = async (promotion: BasePromotion): Promise<boolean> => {
+        const activation = new ExploreOnBingActivation(this.bot)
+        return await activation.activate(promotion)
     }
 
     doQuiz = async (promotion: BasePromotion): Promise<void> => {

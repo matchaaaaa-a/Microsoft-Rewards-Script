@@ -318,6 +318,33 @@ export class MicrosoftRewardsBot {
         })
     }
 
+    private isFlow401Error(error: unknown): boolean {
+        const errorMessage = this.toErrorMessage(error)
+        const errorStatus = (error as { response?: { status?: number } })?.response?.status
+        return errorStatus === 401 || /status code\s*401/i.test(errorMessage)
+    }
+
+    private toErrorMessage(error: unknown): string {
+        return error instanceof Error ? error.message : String(error)
+    }
+
+    private pushFailedAccountStat(
+        accountStats: AccountStats[],
+        accountEmail: string,
+        durationSeconds: string,
+        errorMessage: string
+    ): void {
+        accountStats.push({
+            email: accountEmail,
+            initialPoints: 0,
+            finalPoints: 0,
+            collectedPoints: 0,
+            duration: parseFloat(durationSeconds),
+            success: false,
+            error: errorMessage
+        })
+    }
+
     private async runTasks(accounts: Account[], runStartTime: number): Promise<AccountStats[]> {
         const accountStats: AccountStats[] = []
 
@@ -334,17 +361,30 @@ export class MicrosoftRewardsBot {
                 )
 
                 this.httpcloak = new HttpCloakClient(account.proxy, { debug: this.config.debugLogs })
+                const maxMobileFlowRetries = 3
+                let result: { initialPoints: number; collectedPoints: number } | undefined
+                let lastFlowErrorMessage = ''
 
-                const result: { initialPoints: number; collectedPoints: number } | undefined = await this.Main(
-                    account
-                ).catch(error => {
-                    void this.logger.error(
-                        true,
-                        'FLOW',
-                        `Mobile flow failed for ${accountEmail}: ${error instanceof Error ? error.message : String(error)}`
-                    )
-                    return undefined
-                })
+                for (let attempt = 1; !result && attempt <= maxMobileFlowRetries; attempt++) {
+                    try {
+                        result = await this.Main(account)
+                    } catch (error) {
+                        const errorMessage = this.toErrorMessage(error)
+                        lastFlowErrorMessage = errorMessage
+                        const canRetry = this.isFlow401Error(error) && attempt < maxMobileFlowRetries
+
+                        if (canRetry) {
+                            this.logger.warn(
+                                true,
+                                'FLOW-RETRY',
+                                `Mobile flow 401 for ${accountEmail}, retrying (${attempt}/${maxMobileFlowRetries}) | message=${errorMessage}`
+                            )
+                            await this.utils.wait(this.utils.randomDelay(2500, 4500))
+                        } else {
+                            this.logger.error(true, 'FLOW', `Mobile flow failed for ${accountEmail}: ${errorMessage}`)
+                        }
+                    }
+                }
 
                 const durationSeconds = ((Date.now() - accountStartTime) / 1000).toFixed(1)
 
@@ -369,33 +409,22 @@ export class MicrosoftRewardsBot {
                         'green'
                     )
                 } else {
-                    accountStats.push({
-                        email: accountEmail,
-                        initialPoints: 0,
-                        finalPoints: 0,
-                        collectedPoints: 0,
-                        duration: parseFloat(durationSeconds),
-                        success: false,
-                        error: 'Flow failed'
-                    })
+                    this.pushFailedAccountStat(
+                        accountStats,
+                        accountEmail,
+                        durationSeconds,
+                        lastFlowErrorMessage || 'Flow failed'
+                    )
                 }
             } catch (error) {
                 const durationSeconds = ((Date.now() - accountStartTime) / 1000).toFixed(1)
                 this.logger.error(
                     'main',
                     'ACCOUNT-ERROR',
-                    `${accountEmail}: ${error instanceof Error ? error.message : String(error)}`
+                    `${accountEmail}: ${this.toErrorMessage(error)}`
                 )
 
-                accountStats.push({
-                    email: accountEmail,
-                    initialPoints: 0,
-                    finalPoints: 0,
-                    collectedPoints: 0,
-                    duration: parseFloat(durationSeconds),
-                    success: false,
-                    error: error instanceof Error ? error.message : String(error)
-                })
+                this.pushFailedAccountStat(accountStats, accountEmail, durationSeconds, this.toErrorMessage(error))
             }
         }
 
@@ -512,6 +541,8 @@ export class MicrosoftRewardsBot {
                 if (this.config.workers.doAppPromotions) await this.workers.doAppPromotions(appData)
                 if (this.config.workers.doDailySet) await this.workers.doDailySet(data, this.mainMobilePage)
                 if (this.config.workers.doSpecialPromotions) await this.workers.doSpecialPromotions(data)
+                if (this.config.workers.doExploreOnBingActivation)
+                    await this.workers.doExploreOnBingActivation(data, this.mainMobilePage)
                 if (this.config.workers.doMorePromotions) await this.workers.doMorePromotions(data, this.mainMobilePage)
                 if (this.config.workers.doDailyCheckIn) await this.activities.doDailyCheckIn()
                 if (this.config.workers.doReadToEarn) await this.activities.doReadToEarn()

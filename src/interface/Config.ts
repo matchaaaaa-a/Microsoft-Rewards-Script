@@ -41,6 +41,7 @@ export interface ConfigProxy {
 export interface ConfigWorkers {
     doDailySet: boolean
     doSpecialPromotions: boolean
+    doExploreOnBingActivation: boolean
     doMorePromotions: boolean
     doPunchCards: boolean
     doAppPromotions: boolean

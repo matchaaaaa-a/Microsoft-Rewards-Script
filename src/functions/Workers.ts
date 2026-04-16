@@ -68,11 +68,117 @@ export class Workers {
         this.bot = bot
     }
 
-    private getAttributes(attributes: unknown): Record<string, unknown> {
+    protected getAttributes(attributes: unknown): Record<string, unknown> {
         if (!attributes || typeof attributes !== 'object' || Array.isArray(attributes)) {
             return {}
         }
         return attributes as Record<string, unknown>
+    }
+
+    protected mapPanelPromotion(p: FlyoutPromotion): BasePromotion {
+        return ({
+            ...p,
+            // Some panel payloads use activityType while solver expects promotionType.
+            promotionType: p.promotionType || p.activityType || 'urlreward',
+            attributes: p.attributes ?? {},
+            destinationUrl: p.destinationUrl ?? '',
+            exclusiveLockedFeatureStatus: p.exclusiveLockedFeatureStatus ?? 'unlocked',
+            pointProgressMax: Number(p.pointProgressMax ?? 0),
+            pointProgress: Number(p.pointProgress ?? 0),
+            activityProgress: Number(p.activityProgress ?? 0),
+            activityProgressMax: Number(p.activityProgressMax ?? 0)
+        } as PanelMappedPromotionForSolver) as BasePromotion
+    }
+
+    private dedupePromotionsByOfferId(promotions: BasePromotion[]): BasePromotion[] {
+        const seen = new Map<string, BasePromotion>()
+
+        promotions.forEach((promotion, index) => {
+            const attrs = this.getAttributes(promotion.attributes)
+            const key = String(promotion.offerId ?? attrs.offerid ?? attrs.offerId ?? '').toLowerCase() || `__idx_${index}`
+            seen.set(key, promotion)
+        })
+
+        return [...seen.values()]
+    }
+
+    private getPanelMorePromotions(): BasePromotion[] {
+        const panelMorePromotions = this.bot.panelData?.flyoutResult?.morePromotions ?? []
+        return this.dedupePromotionsByOfferId(panelMorePromotions.filter(Boolean).map(p => this.mapPanelPromotion(p)))
+    }
+
+    private getDashboardMorePromotions(data: DashboardData): BasePromotion[] {
+        return this.dedupePromotionsByOfferId(
+            [...(data.morePromotions ?? []), ...(data.morePromotionsWithoutPromotionalItems ?? [])]
+                .filter(Boolean)
+                .map(p => p as BasePromotion)
+        )
+    }
+
+    private isExploreOnBingActivationOffer(activity: BasePromotion): boolean {
+        const attrs = this.getAttributes(activity.attributes)
+        const name = String(activity.name ?? '').toLowerCase()
+        const offerId = String(activity.offerId ?? '').toLowerCase()
+        const attrsOfferId = String(attrs.offerid ?? attrs.offerId ?? '').toLowerCase()
+
+        return (
+            name.includes('exploreonbing_activation') ||
+            offerId.includes('exploreonbing_activation') ||
+            attrsOfferId.includes('exploreonbing_activation')
+        )
+    }
+
+    protected isCompletedByAttributesOrProgress(activity: BasePromotion): boolean {
+        const attrs = this.getAttributes(activity.attributes)
+        const progress = Number(activity.pointProgress ?? attrs.progress ?? 0)
+        const max = Number(activity.pointProgressMax ?? attrs.max ?? 0)
+        const completeRaw = attrs.complete
+        const attrsComplete =
+            typeof completeRaw === 'string' ? completeRaw.toLowerCase() === 'true' : Boolean(completeRaw)
+
+        return attrsComplete || (max > 0 && progress >= max)
+    }
+
+    private async readDashboardCompletion(offerId: string): Promise<{ complete: boolean; progress: number; max: number }> {
+        try {
+            const dashboard = await this.bot.browser.func.getDashboardData()
+            const allDaily = Object.values(dashboard.dailySetPromotions ?? {}).flat()
+            const allMore = [
+                ...(dashboard.morePromotions ?? []),
+                ...(dashboard.morePromotionsWithoutPromotionalItems ?? []),
+                ...(dashboard.promotionalItems ?? [])
+            ]
+            const allPunch = (dashboard.punchCards ?? []).flatMap(pc => [pc.parentPromotion, ...(pc.childPromotions ?? [])])
+            const all = [...allDaily, ...allMore, ...allPunch] as unknown as BasePromotion[]
+            const key = offerId.toLowerCase()
+
+            const found = all.find(x => {
+                const attrs = this.getAttributes(x.attributes)
+                const top = String(x.offerId ?? '').toLowerCase()
+                const attrOffer = String(attrs.offerid ?? attrs.offerId ?? '').toLowerCase()
+                return top === key || attrOffer === key
+            })
+
+            if (!found) {
+                return { complete: false, progress: 0, max: 0 }
+            }
+
+            const attrs = this.getAttributes(found.attributes)
+            const progress = Number(found.pointProgress ?? attrs.progress ?? 0)
+            const max = Number(found.pointProgressMax ?? attrs.max ?? 0)
+            return {
+                complete: this.isCompletedByAttributesOrProgress(found),
+                progress,
+                max
+            }
+        } catch (error) {
+            this.bot.logger.debug(
+                this.bot.isMobile,
+                'ACTIVITY',
+                `Dashboard recheck failed | offerId=${offerId} | error=${error instanceof Error ? error.message : String(error)}`
+            )
+            return { complete: false, progress: 0, max: 0 }
+        }
     }
 
     private async refreshSessionCookiesFromPage(page: Page): Promise<void> {
@@ -160,7 +266,12 @@ export class Workers {
         const todayKey = this.bot.utils.getFormattedDate()
         const todayData = data.dailySetPromotions[todayKey]
 
-        const activitiesUncompleted = todayData?.filter(x => !x?.complete && x.pointProgressMax > 0) ?? []
+        const activitiesUncompleted =
+            todayData?.filter(x => {
+                const activity = x as BasePromotion
+                const isCompleted = this.isCompletedByAttributesOrProgress(activity)
+                return !isCompleted && x.pointProgressMax > 0
+            }) ?? []
         const activitiesUncompletedFiltered = this.filterOutExtraSearchOffers(activitiesUncompleted)
 
         if (!activitiesUncompletedFiltered.length) {
@@ -176,33 +287,11 @@ export class Workers {
     }
 
     public async doMorePromotions(data: DashboardData, page: Page) {
-        const panelMorePromotions = this.bot.panelData?.flyoutResult?.morePromotions ?? []
-        const mapPanelPromotion = (p: FlyoutPromotion): BasePromotion =>
-            ({
-                ...p,
-                // Some panel payloads use activityType while solver expects promotionType.
-                promotionType: p.promotionType || p.activityType || 'urlreward',
-                attributes: p.attributes ?? {},
-                destinationUrl: p.destinationUrl ?? '',
-                exclusiveLockedFeatureStatus: p.exclusiveLockedFeatureStatus ?? 'unlocked',
-                pointProgressMax: Number(p.pointProgressMax ?? 0),
-                pointProgress: Number(p.pointProgress ?? 0),
-                activityProgress: Number(p.activityProgress ?? 0),
-                activityProgressMax: Number(p.activityProgressMax ?? 0)
-            } as PanelMappedPromotionForSolver) as BasePromotion
+        const panelSource = this.getPanelMorePromotions()
+        const dashboardSource = this.getDashboardMorePromotions(data)
+        const morePromotions: BasePromotion[] = panelSource.length > 0 ? panelSource : dashboardSource
 
-        const morePromotions: BasePromotion[] =
-            panelMorePromotions.length > 0
-                ? [...new Map(panelMorePromotions.filter(Boolean).map(p => [p.offerId, mapPanelPromotion(p)] as const)).values()]
-                : [
-                      ...new Map(
-                          [...(data.morePromotions ?? []), ...(data.morePromotionsWithoutPromotionalItems ?? [])]
-                              .filter(Boolean)
-                              .map(p => [p.offerId, p as BasePromotion] as const)
-                      ).values()
-                  ]
-
-        if (panelMorePromotions.length > 0) {
+        if (panelSource.length > 0) {
             this.bot.logger.debug(
                 this.bot.isMobile,
                 'MORE-PROMOTIONS',
@@ -218,7 +307,11 @@ export class Workers {
 
         const activitiesUncompleted: BasePromotion[] =
             morePromotions?.filter(x => {
-                if (x?.complete) return false
+                const isCompleted = this.isCompletedByAttributesOrProgress(x)
+                if (isCompleted) return false
+                if (this.bot.config.workers.doExploreOnBingActivation && this.isExploreOnBingActivationOffer(x)) {
+                    return false
+                }
                 const attrs = this.getAttributes(x.attributes)
                 const maxPoints = x?.pointProgressMax || Number(attrs.max ?? 0) || 0
                 if (maxPoints <= 0 && x.exclusiveLockedFeatureStatus !== 'notsupported') return false
@@ -230,7 +323,9 @@ export class Workers {
                 return true
             }) ?? []
 
-        if (!this.filterOutExtraSearchOffers(activitiesUncompleted).length) {
+        const filteredActivities = this.filterOutExtraSearchOffers(activitiesUncompleted)
+
+        if (!filteredActivities.length) {
             this.bot.logger.info(
                 this.bot.isMobile,
                 'MORE-PROMOTIONS',
@@ -242,12 +337,59 @@ export class Workers {
         this.bot.logger.info(
             this.bot.isMobile,
             'MORE-PROMOTIONS',
-            `Started solving ${this.filterOutExtraSearchOffers(activitiesUncompleted).length} "More Promotions" items`
+            `Started solving ${filteredActivities.length} "More Promotions" items`
         )
 
-        await this.solveActivities(this.filterOutExtraSearchOffers(activitiesUncompleted), page)
+        await this.solveActivities(filteredActivities, page)
 
         this.bot.logger.info(this.bot.isMobile, 'MORE-PROMOTIONS', 'All "More Promotion" items have been completed')
+    }
+
+    public async doExploreOnBingActivation(data: DashboardData, page: Page) {
+        const panelSource = this.getPanelMorePromotions()
+        const dashboardSource = this.getDashboardMorePromotions(data)
+
+        // Merge panel + dashboard so activation offers missing in panel are still discoverable.
+        const sourcePromotions = this.dedupePromotionsByOfferId([...panelSource, ...dashboardSource])
+
+        this.bot.logger.debug(
+            this.bot.isMobile,
+            'EXPLOREONBING-ACTIVATION',
+            `Activation source merge | panel=${panelSource.length} | dashboard=${dashboardSource.length} | merged=${sourcePromotions.length}`
+        )
+
+        const activationActivities = sourcePromotions.filter(x => {
+            if (!this.isExploreOnBingActivationOffer(x)) return false
+            if (this.isCompletedByAttributesOrProgress(x)) return false
+            if (x.exclusiveLockedFeatureStatus === 'locked') return false
+
+            const attrs = this.getAttributes(x.attributes)
+            const type = (x.promotionType || String(attrs.type ?? '')).toLowerCase()
+            return type === 'urlreward'
+        })
+
+        if (!activationActivities.length) {
+            this.bot.logger.info(
+                this.bot.isMobile,
+                'EXPLOREONBING-ACTIVATION',
+                'No pending exploreonbing_activation activities found'
+            )
+            return
+        }
+
+        this.bot.logger.info(
+            this.bot.isMobile,
+            'EXPLOREONBING-ACTIVATION',
+            `Started separate exploreonbing_activation worker | count=${activationActivities.length}`
+        )
+
+        await this.solveActivities(activationActivities, page)
+
+        this.bot.logger.info(
+            this.bot.isMobile,
+            'EXPLOREONBING-ACTIVATION',
+            'Completed separate exploreonbing_activation worker'
+        )
     }
 
     /**
@@ -1399,6 +1541,7 @@ export class Workers {
                         // Search on Bing are subtypes of "urlreward"
                         const titleLower = activity.title?.toLowerCase() ?? ''
                         const descriptionLower = activity.description?.toLowerCase() ?? ''
+                        const isExploreOnBingActivationOffer = this.isExploreOnBingActivationOffer(basePromotion)
                         const isExtraSearchOffer = this.extraSearchOfferIds.has(offerId.toLowerCase())
                         const isExploreOnBing =
                             name.includes('exploreonbing') ||
@@ -1416,7 +1559,9 @@ export class Workers {
                             const attrsComplete =
                                 typeof completeRaw === 'string' ? completeRaw.toLowerCase() === 'true' : Boolean(completeRaw)
                             const isAlreadyCompleted =
-                                basePromotion.complete ||
+                                (isExploreOnBingActivationOffer
+                                    ? false
+                                    : basePromotion.complete) ||
                                 attrsComplete ||
                                 (pointProgressMax > 0 && pointProgress >= pointProgressMax)
 
@@ -1425,6 +1570,36 @@ export class Workers {
                                     this.bot.isMobile,
                                     'ACTIVITY',
                                     `Skipping SearchOnBing activity already completed | title="${activity.title}" | offerId=${offerId} | progress=${pointProgress}/${pointProgressMax}`
+                                )
+                                break
+                            }
+
+                            if (isExploreOnBingActivationOffer) {
+                                this.bot.logger.info(
+                                    this.bot.isMobile,
+                                    'ACTIVITY',
+                                    `Activation flow start | title="${activity.title}" | offerId=${offerId}`
+                                )
+
+                                await this.bot.activities.doExploreOnBingActivation(basePromotion)
+
+                                const isModernActivationFlow =
+                                    this.bot.rewardsVersion === 'modern' || this.isModernPunchCardActivity(basePromotion)
+                                if (isModernActivationFlow) {
+                                    this.bot.logger.info(
+                                        this.bot.isMobile,
+                                        'ACTIVITY',
+                                        `Skipping SearchOnBing for activation in modern flow | offerId=${offerId}`
+                                    )
+                                } else {
+                                    await this.bot.activities.doSearchOnBing(basePromotion, page)
+                                }
+
+                                const recheck = await this.readDashboardCompletion(offerId)
+                                this.bot.logger.info(
+                                    this.bot.isMobile,
+                                    'ACTIVITY',
+                                    `Activation flow dashboard recheck | offerId=${offerId} | complete=${recheck.complete} | progress=${recheck.progress}/${recheck.max}`
                                 )
                                 break
                             }
@@ -1504,8 +1679,9 @@ export class Workers {
                                 await this.bot.activities.doSearchOnBing(basePromotion, page)
                                 break
                             }
+
                             // First try to activate via reportactivity API (some exploreonbing tasks only need activation)
-                            if (this.bot.requestToken && !isPunchCardChildOffer) {
+                            if (this.bot.requestToken && !isPunchCardChildOffer && !isExploreOnBingActivationOffer) {
                                 this.bot.logger.info(
                                     this.bot.isMobile,
                                     'ACTIVITY',

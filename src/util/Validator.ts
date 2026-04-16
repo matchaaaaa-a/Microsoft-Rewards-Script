@@ -55,6 +55,7 @@ export const ConfigSchema = z.object({
     workers: z.object({
         doDailySet: z.boolean(),
         doSpecialPromotions: z.boolean(),
+        doExploreOnBingActivation: z.boolean(),
         doMorePromotions: z.boolean(),
         doPunchCards: z.boolean(),
         doAppPromotions: z.boolean(),
